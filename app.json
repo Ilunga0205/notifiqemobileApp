@@ -1,4 +1,9 @@
 {
   "name": "notifiqemobile",
-  "displayName": "notifiqemobile"
+  "displayName": "notifiqemobile",
+  "extra": {
+    "eas": {
+      "projectId": "7007d4c8-c7d3-46d4-995d-37d6d8bbe906"
+    }
+  }
 }
