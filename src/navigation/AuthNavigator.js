@@ -8,12 +8,14 @@ import AppNavigator from './AppNavigator';
 
 const Stack = createNativeStackNavigator();
 
-export default function AuthNavigator() {
+export default function AuthNavigator({ completeOnboarding }) {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="Login"      component={LoginScreen}      />
       <Stack.Screen name="Register"   component={RegisterScreen}   />
-      <Stack.Screen name="Onboarding" component={OnboardingScreen} />
+      <Stack.Screen name="Onboarding">
+        {props => <OnboardingScreen {...props} completeOnboarding={completeOnboarding} />}
+      </Stack.Screen>
       <Stack.Screen name="App"        component={AppNavigator}     />
     </Stack.Navigator>
   );

@@ -1,15 +1,18 @@
 // src/screens/auth/OnboardingScreen.js
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
   StyleSheet, SafeAreaView, Share, Platform,
 } from 'react-native';
-import { Clipboard } from 'react-native';
+import Clipboard from '@react-native-clipboard/clipboard';
 import { colors, typography, spacing, radius, shadows, POST_TYPES } from '../../lib/tokens';
 import { Button, StepIndicator, Divider } from '../../components/UI';
+import { supabase } from '../../lib/supabase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export default function OnboardingScreen({ navigation }) {
+export default function OnboardingScreen({ navigation, completeOnboarding }) {
   const [step, setStep] = useState(1);
+  const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [postTypes, setPostTypes] = useState(
     POST_TYPES.map(pt => ({ ...pt, enabled: true }))
@@ -18,9 +21,43 @@ export default function OnboardingScreen({ navigation }) {
   const [invitesSent, setInvitesSent] = useState([]);
   const [inviteError, setInviteError] = useState('');
 
-  const firstName = ''; // will come from auth context
-  const orgSlug = 'acme-corp';
-  const inviteLink = `https://app.notifiqe.com/join/${orgSlug}/abc123`;
+  const [firstName, setFirstName] = useState('');
+  const [orgSlug,   setOrgSlug]   = useState('');
+  const [inviteLink, setInviteLink] = useState('');
+
+  useEffect(() => {
+    const loadUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setLoading(false); return; }
+
+      const fullName = user.user_metadata?.full_name || '';
+      setFirstName(fullName.split(' ')[0]);
+
+      const { data: membership } = await supabase
+        .from('memberships')
+        .select('organisations(slug, invite_token)')
+        .eq('user_id', user.id)
+        .eq('status', 'active')
+        .single();
+
+      if (membership?.organisations) {
+        const slug  = membership.organisations.slug;
+        const token = membership.organisations.invite_token || 'abc123';
+        setOrgSlug(slug);
+        setInviteLink(`https://app.notifiqe.com/join/${slug}/${token}`);
+      }
+      setLoading(false);
+    };
+    loadUser();
+  }, []);
+
+  const handleFinish = async () => {
+    if (completeOnboarding) {
+      await completeOnboarding();
+    } else {
+      await AsyncStorage.setItem('notifiqe_onboarding_done', 'true');
+    }
+  };
 
   const handleCopy = () => {
     Clipboard.setString(inviteLink);
@@ -50,7 +87,8 @@ export default function OnboardingScreen({ navigation }) {
     setPostTypes(prev => prev.map((pt, i) => i === index ? { ...pt, enabled: !pt.enabled } : pt));
   };
 
-const handleFinish = () => navigation.replace('App');
+
+  if (loading) return <SafeAreaView style={styles.safe} />;
 
   return (
     <SafeAreaView style={styles.safe}>

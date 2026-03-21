@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { Button, Input, ErrorBanner, Divider } from '../../components/UI';
+import { supabase } from '../../lib/supabase';
 
 export default function LoginScreen({ navigation }) {
   const [form, setForm] = useState({ email: '', password: '' });
@@ -23,9 +24,47 @@ export default function LoginScreen({ navigation }) {
       setError('Please fill in all fields.');
       return;
     }
+
     setLoading(true);
-    // Supabase auth will go here
-    setTimeout(() => setLoading(false), 1500);
+    setError('');
+
+    try {
+      // 1. Sign in
+      const { data, error: signInError } = await supabase.auth.signInWithPassword({
+        email:    form.email.trim().toLowerCase(),
+        password: form.password,
+      });
+      if (signInError) throw signInError;
+
+      // 2. Get their org from memberships
+      const { data: membership, error: memberError } = await supabase
+        .from('memberships')
+        .select('org_id, organisations(slug, name)')
+        .eq('user_id', data.user.id)
+        .eq('status', 'active')
+        .single();
+
+      setLoading(false);
+
+      if (memberError || !membership) {
+        // No org yet — go to onboarding
+        navigation.replace('App');
+        return;
+      }
+
+      // Success — navigate to app
+      navigation.replace('App');
+
+    } catch (err) {
+      setLoading(false);
+      if (err.message === 'Invalid login credentials') {
+        setError('Incorrect email or password. Please try again.');
+      } else if (err.message?.includes('Email not confirmed')) {
+        setError('Please check your email and confirm your account first.');
+      } else {
+        setError(err.message);
+      }
+    }
   };
 
   return (
@@ -39,7 +78,6 @@ export default function LoginScreen({ navigation }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-
           {/* ── Logo nav ── */}
           <View style={styles.nav}>
             <Text style={styles.logo}>
@@ -56,7 +94,6 @@ export default function LoginScreen({ navigation }) {
           {/* ── Main card ── */}
           <View style={styles.main}>
 
-            {/* Header */}
             <View style={styles.header}>
               <Text style={styles.title}>Welcome back.</Text>
               <Text style={styles.subtitle}>
@@ -64,11 +101,9 @@ export default function LoginScreen({ navigation }) {
               </Text>
             </View>
 
-            {/* Error */}
             <ErrorBanner message={error} />
             {error ? <View style={{ height: spacing.lg }} /> : null}
 
-            {/* Email */}
             <Input
               label="Work email"
               placeholder="you@company.com"
@@ -77,7 +112,6 @@ export default function LoginScreen({ navigation }) {
               keyboardType="email-address"
               autoCapitalize="none"
               autoComplete="email"
-              error={error && !form.email ? ' ' : ''}
             />
 
             <View style={{ height: spacing.lg }} />
@@ -92,7 +126,7 @@ export default function LoginScreen({ navigation }) {
               </View>
               <View style={styles.passwordWrapper}>
                 <TextInput
-                  style={[styles.input, error && !form.password && styles.inputError]}
+                  style={styles.input}
                   placeholder="Enter your password"
                   placeholderTextColor={colors.placeholder}
                   secureTextEntry={!showPassword}
@@ -113,7 +147,6 @@ export default function LoginScreen({ navigation }) {
 
             <View style={{ height: spacing.xl }} />
 
-            {/* Submit */}
             <Button
               label={loading ? 'Signing in...' : 'Sign in →'}
               onPress={handleSubmit}
@@ -121,18 +154,15 @@ export default function LoginScreen({ navigation }) {
               variant="primary"
             />
 
-            {/* Divider */}
             <View style={{ marginVertical: spacing.xxl }}>
               <Divider label="or" />
             </View>
 
-            {/* Google SSO */}
             <TouchableOpacity style={styles.googleBtn} activeOpacity={0.85}>
               <Text style={styles.googleIcon}>G</Text>
               <Text style={styles.googleText}>Continue with Google</Text>
             </TouchableOpacity>
 
-            {/* Footer */}
             <Text style={styles.footer}>
               By signing in you agree to our{' '}
               <Text style={styles.footerLink}>Terms</Text>
@@ -148,151 +178,27 @@ export default function LoginScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: colors.white,
-  },
-  scroll: {
-    flexGrow: 1,
-  },
-
-  // Nav
-  nav: {
-    height: 64,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.page,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderLight,
-  },
-  logo: {
-    fontSize: typography.xl,
-    fontWeight: typography.black,
-    letterSpacing: -0.5,
-    color: colors.black,
-  },
-  logoAccent: {
-    color: colors.brand,
-  },
-  navText: {
-    fontSize: typography.base,
-    color: colors.muted,
-  },
-  navLink: {
-    color: colors.brand,
-    fontWeight: typography.semibold,
-  },
-
-  // Main
-  main: {
-    flex: 1,
-    paddingHorizontal: spacing.page,
-    paddingTop: spacing.xxxl,
-    paddingBottom: spacing.xxxl,
-    maxWidth: 420,
-    width: '100%',
-    alignSelf: 'center',
-  },
-
-  // Header
-  header: {
-    marginBottom: spacing.xxxl,
-  },
-  title: {
-    fontSize: typography.h1,
-    fontWeight: typography.black,
-    letterSpacing: -1,
-    color: colors.black,
-    marginBottom: spacing.sm,
-  },
-  subtitle: {
-    fontSize: typography.md,
-    color: colors.muted,
-    lineHeight: 24,
-  },
-
-  // Password field
-  label: {
-    fontSize: typography.sm,
-    fontWeight: typography.semibold,
-    color: colors.body,
-    marginBottom: 4,
-  },
-  passwordLabelRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  forgotLink: {
-    fontSize: typography.sm,
-    color: colors.brand,
-    fontWeight: typography.medium,
-  },
-  passwordWrapper: {
-    position: 'relative',
-  },
-  input: {
-    height: 48,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingRight: 64,
-    fontSize: typography.base,
-    color: colors.black,
-    backgroundColor: colors.white,
-  },
-  inputError: {
-    borderColor: colors.error,
-  },
-  showBtn: {
-    position: 'absolute',
-    right: spacing.md,
-    top: 0,
-    bottom: 0,
-    justifyContent: 'center',
-  },
-  showBtnText: {
-    fontSize: typography.sm,
-    color: colors.subtle,
-    fontWeight: typography.medium,
-  },
-
-  // Google
-  googleBtn: {
-    height: 48,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.white,
-  },
-  googleIcon: {
-    fontSize: typography.lg,
-    fontWeight: typography.bold,
-    color: '#4285F4',
-  },
-  googleText: {
-    fontSize: typography.base,
-    fontWeight: typography.semibold,
-    color: colors.body,
-  },
-
-  // Footer
-  footer: {
-    textAlign: 'center',
-    fontSize: typography.xs,
-    color: colors.placeholder,
-    marginTop: spacing.xxl,
-    lineHeight: 20,
-  },
-  footerLink: {
-    color: colors.muted,
-    textDecorationLine: 'underline',
-  },
+  safe: { flex: 1, backgroundColor: colors.white },
+  scroll: { flexGrow: 1 },
+  nav: { height: 64, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.page, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  logo: { fontSize: typography.xl, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
+  logoAccent: { color: colors.brand },
+  navText: { fontSize: typography.base, color: colors.muted },
+  navLink: { color: colors.brand, fontWeight: typography.semibold },
+  main: { flex: 1, paddingHorizontal: spacing.page, paddingTop: spacing.xxxl, paddingBottom: spacing.xxxl, maxWidth: 420, width: '100%', alignSelf: 'center' },
+  header: { marginBottom: spacing.xxxl },
+  title: { fontSize: typography.h1, fontWeight: typography.black, letterSpacing: -1, color: colors.black, marginBottom: spacing.sm },
+  subtitle: { fontSize: typography.md, color: colors.muted, lineHeight: 24 },
+  label: { fontSize: typography.sm, fontWeight: typography.semibold, color: colors.body, marginBottom: 4 },
+  passwordLabelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  forgotLink: { fontSize: typography.sm, color: colors.brand, fontWeight: typography.medium },
+  passwordWrapper: { position: 'relative' },
+  input: { height: 48, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingRight: 64, fontSize: typography.base, color: colors.black, backgroundColor: colors.white },
+  showBtn: { position: 'absolute', right: spacing.md, top: 0, bottom: 0, justifyContent: 'center' },
+  showBtnText: { fontSize: typography.sm, color: colors.subtle, fontWeight: typography.medium },
+  googleBtn: { height: 48, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, backgroundColor: colors.white },
+  googleIcon: { fontSize: typography.lg, fontWeight: typography.bold, color: '#4285F4' },
+  googleText: { fontSize: typography.base, fontWeight: typography.semibold, color: colors.body },
+  footer: { textAlign: 'center', fontSize: typography.xs, color: colors.placeholder, marginTop: spacing.xxl, lineHeight: 20 },
+  footerLink: { color: colors.muted, textDecorationLine: 'underline' },
 });

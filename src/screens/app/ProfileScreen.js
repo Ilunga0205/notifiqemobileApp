@@ -1,11 +1,13 @@
 // src/screens/app/ProfileScreen.js
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
   StyleSheet, SafeAreaView, Modal, Pressable,
   Platform, StatusBar, Alert,
 } from 'react-native';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
+import { supabase } from '../../lib/supabase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
 
@@ -83,50 +85,182 @@ function Field({ label, children }) {
 // ── MAIN SCREEN ───────────────────────────────────────────────────────────────
 
 export default function ProfileScreen({ navigation }) {
-  const [name,         setName]         = useState('Sarah M.');
-  const [email,        setEmail]        = useState('sarah@acmecorp.com');
+  const [loading,      setLoading]      = useState(true);
+  const [saving,       setSaving]       = useState(false);
+  const [userId,       setUserId]       = useState(null);
+  const [name,         setName]         = useState('');
+  const [email,        setEmail]        = useState('');
+  const [role,         setRole]         = useState('member');
+  const [orgName,      setOrgName]      = useState('');
   const [avatarColor,  setAvatarColor]  = useState('#1D4ED8');
   const [nameEdit,     setNameEdit]     = useState(false);
   const [nameDraft,    setNameDraft]    = useState('');
-  const [emailEdit,    setEmailEdit]    = useState(false);
-  const [emailDraft,   setEmailDraft]   = useState('');
   const [currentPw,    setCurrentPw]    = useState('');
   const [newPw,        setNewPw]        = useState('');
   const [confirmPw,    setConfirmPw]    = useState('');
   const [showPw,       setShowPw]       = useState(false);
   const [pwError,      setPwError]      = useState('');
+  const [pwSaving,     setPwSaving]     = useState(false);
   const [toast,        setToast]        = useState(null);
   const [confirmModal, setConfirmModal] = useState(null);
-
-  const orgName = 'Acme Corp';
 
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   };
 
-  const saveName = () => {
-    if (nameDraft.trim()) { setName(nameDraft.trim()); showToast('Name updated'); }
+  // ── Load profile — cache first, then refresh from Supabase ──
+  useEffect(() => {
+    const load = async () => {
+      // 1. Load from cache instantly (no flash)
+      const cached = await AsyncStorage.getItem('notifiqe_profile');
+      if (cached) {
+        const p = JSON.parse(cached);
+        setUserId(p.userId);
+        setName(p.name);
+        setEmail(p.email);
+        setAvatarColor(p.avatarColor);
+        setRole(p.role);
+        setOrgName(p.orgName);
+        setLoading(false); // show immediately from cache
+      }
+
+      // 2. Refresh from Supabase in background
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('full_name, email, avatar_color, avatar_initials')
+        .eq('id', user.id)
+        .single();
+
+      const { data: membership } = await supabase
+        .from('memberships')
+        .select('role, organisations(name)')
+        .eq('user_id', user.id)
+        .eq('status', 'active')
+        .single();
+
+      const freshData = {
+        userId:      user.id,
+        name:        profile?.full_name || user.user_metadata?.full_name || '',
+        email:       profile?.email || user.email || '',
+        avatarColor: profile?.avatar_color || '#1D4ED8',
+        role:        membership?.role || 'member',
+        orgName:     membership?.organisations?.name || '',
+      };
+
+      // Update UI with fresh data
+      setUserId(freshData.userId);
+      setName(freshData.name);
+      setEmail(freshData.email);
+      setAvatarColor(freshData.avatarColor);
+      setRole(freshData.role);
+      setOrgName(freshData.orgName);
+      setLoading(false);
+
+      // Save to cache for next time
+      await AsyncStorage.setItem('notifiqe_profile', JSON.stringify(freshData));
+    };
+    load();
+  }, []);
+
+  // ── Save name ──
+  const saveName = async () => {
+    const trimmed = nameDraft.trim();
+    if (!trimmed) return;
+    setSaving(true);
+    const initials = trimmed.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+    await supabase.from('profiles').update({ full_name: trimmed, avatar_initials: initials }).eq('id', userId);
+    setName(trimmed);
     setNameEdit(false);
+    setSaving(false);
+    // Update cache
+    const cached = await AsyncStorage.getItem('notifiqe_profile');
+    if (cached) await AsyncStorage.setItem('notifiqe_profile', JSON.stringify({ ...JSON.parse(cached), name: trimmed }));
+    showToast('Name updated');
   };
 
-  const saveEmail = () => {
-    if (emailDraft.includes('@')) { setEmail(emailDraft.trim()); showToast('Email updated'); }
-    setEmailEdit(false);
+  // ── Save avatar colour ──
+  const saveAvatarColor = async (color) => {
+    setAvatarColor(color);
+    await supabase.from('profiles').update({ avatar_color: color }).eq('id', userId);
+    // Update cache
+    const cached = await AsyncStorage.getItem('notifiqe_profile');
+    if (cached) await AsyncStorage.setItem('notifiqe_profile', JSON.stringify({ ...JSON.parse(cached), avatarColor: color }));
+    showToast('Avatar colour updated');
   };
 
-  const changePassword = () => {
+  // ── Change password ──
+  const changePassword = async () => {
     setPwError('');
     if (!currentPw)          { setPwError('Enter your current password.'); return; }
     if (newPw.length < 8)    { setPwError('New password must be at least 8 characters.'); return; }
     if (newPw !== confirmPw) { setPwError("Passwords don't match."); return; }
+    setPwSaving(true);
+
+    // Re-authenticate first
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password: currentPw });
+    if (signInError) { setPwError('Current password is incorrect.'); setPwSaving(false); return; }
+
+    // Update password
+    const { error: updateError } = await supabase.auth.updateUser({ password: newPw });
+    if (updateError) { setPwError(updateError.message); setPwSaving(false); return; }
+
     setCurrentPw(''); setNewPw(''); setConfirmPw('');
+    setPwSaving(false);
     showToast('Password changed');
+  };
+
+  // ── Sign out ──
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setConfirmModal(null);
+  };
+
+  // ── Leave workspace ──
+  const handleLeaveWorkspace = async () => {
+    await supabase.from('memberships').update({ status: 'inactive' }).eq('user_id', userId);
+    await supabase.auth.signOut();
+    setConfirmModal(null);
   };
 
   const pwStrength = !newPw ? null : newPw.length < 6 ? 'weak' : newPw.length < 10 ? 'fair' : 'strong';
   const pwStrengthColor = { weak: '#DC2626', fair: '#F59E0B', strong: '#10B981' }[pwStrength];
   const pwStrengthWidth = { weak: '33%', fair: '66%', strong: '100%' }[pwStrength];
+
+  if (loading) return (
+    <View style={styles.root}>
+      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={Platform.OS === 'android'} />
+      {Platform.OS === 'ios' ? (
+        <SafeAreaView style={{ backgroundColor: colors.white }}>
+          <View style={styles.appHeader}>
+            <View style={{ width: 36 }} />
+            <View style={styles.appHeaderCenter}>
+              <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
+            </View>
+            <View style={{ width: 36 }} />
+          </View>
+        </SafeAreaView>
+      ) : (
+        <View style={styles.headerBlock}>
+          <View style={styles.appHeader}>
+            <View style={{ width: 36 }} />
+            <View style={styles.appHeaderCenter}>
+              <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
+            </View>
+            <View style={{ width: 36 }} />
+          </View>
+        </View>
+      )}
+      <View style={styles.skeletonWrap}>
+        <View style={styles.skeletonAvatar} />
+        <View style={styles.skeletonLine} />
+        <View style={[styles.skeletonLine, { width: 140, marginTop: 6 }]} />
+      </View>
+    </View>
+  );
 
   return (
     <View style={styles.root}>
@@ -181,7 +315,7 @@ export default function ProfileScreen({ navigation }) {
               <TouchableOpacity
                 key={c}
                 style={[styles.colorDot, { backgroundColor: c, borderWidth: avatarColor === c ? 2.5 : 0, borderColor: '#111827' }]}
-                onPress={() => { setAvatarColor(c); showToast('Avatar colour updated'); }}
+                onPress={() => saveAvatarColor(c)}
                 activeOpacity={0.8}
               />
             ))}
@@ -215,8 +349,8 @@ export default function ProfileScreen({ navigation }) {
                   autoFocus
                   returnKeyType="done"
                 />
-                <TouchableOpacity style={styles.editSave} onPress={saveName} activeOpacity={0.85}>
-                  <Text style={styles.editSaveText}>Save</Text>
+                <TouchableOpacity style={[styles.editSave, saving && { opacity: 0.7 }]} onPress={saveName} disabled={saving} activeOpacity={0.85}>
+                  <Text style={styles.editSaveText}>{saving ? '...' : 'Save'}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.editCancel} onPress={() => setNameEdit(false)} activeOpacity={0.8}>
                   <Text style={styles.editCancelText}>✕</Text>
@@ -236,39 +370,11 @@ export default function ProfileScreen({ navigation }) {
             )}
           </Field>
 
-          {/* Email */}
+          {/* Email — read only */}
           <Field label="EMAIL ADDRESS">
-            {emailEdit ? (
-              <View style={styles.editRow}>
-                <TextInput
-                  style={styles.editInput}
-                  value={emailDraft}
-                  onChangeText={setEmailDraft}
-                  onSubmitEditing={saveEmail}
-                  autoFocus
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                  returnKeyType="done"
-                />
-                <TouchableOpacity style={styles.editSave} onPress={saveEmail} activeOpacity={0.85}>
-                  <Text style={styles.editSaveText}>Save</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.editCancel} onPress={() => setEmailEdit(false)} activeOpacity={0.8}>
-                  <Text style={styles.editCancelText}>✕</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View style={styles.displayRow}>
-                <Text style={styles.displayValue}>{email}</Text>
-                <TouchableOpacity
-                  style={styles.editBtn}
-                  onPress={() => { setEmailDraft(email); setEmailEdit(true); }}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.editBtnText}>Edit</Text>
-                </TouchableOpacity>
-              </View>
-            )}
+            <View style={styles.displayRow}>
+              <Text style={styles.displayValue}>{email}</Text>
+            </View>
           </Field>
 
           {/* Role */}
@@ -338,11 +444,11 @@ export default function ProfileScreen({ navigation }) {
           <TouchableOpacity
             style={[styles.updatePwBtn, (!currentPw || !newPw || !confirmPw) && styles.updatePwBtnDisabled]}
             onPress={changePassword}
-            disabled={!currentPw || !newPw || !confirmPw}
+            disabled={!currentPw || !newPw || !confirmPw || pwSaving}
             activeOpacity={0.85}
           >
             <Text style={[styles.updatePwBtnText, (!currentPw || !newPw || !confirmPw) && styles.updatePwBtnTextDisabled]}>
-              Update password
+              {pwSaving ? 'Updating...' : 'Update password'}
             </Text>
           </TouchableOpacity>
         </View>
@@ -354,10 +460,10 @@ export default function ProfileScreen({ navigation }) {
             style={styles.actionRow}
             onPress={() => setConfirmModal({
               title: 'Sign out?',
-              body: "You'll need to sign back in to access your workspace.",
+              body: "You can always sign back in.",
               confirmLabel: 'Sign out',
               danger: false,
-              onConfirm: () => setConfirmModal(null),
+              onConfirm: handleSignOut,
             })}
             activeOpacity={0.8}
           >
@@ -377,10 +483,10 @@ export default function ProfileScreen({ navigation }) {
             style={styles.actionRow}
             onPress={() => setConfirmModal({
               title: 'Leave workspace?',
-              body: "You'll lose access to all posts, channels, and calendar events. An admin will need to invite you back.",
+              body: "You'll lose access to all posts and data. An admin will need to invite you back.",
               confirmLabel: 'Leave workspace',
               danger: true,
-              onConfirm: () => setConfirmModal(null),
+              onConfirm: handleLeaveWorkspace,
             })}
             activeOpacity={0.8}
           >
@@ -495,6 +601,10 @@ const styles = StyleSheet.create({
   toast: { position: 'absolute', bottom: 80, alignSelf: 'center', backgroundColor: '#111827', borderRadius: 100, paddingHorizontal: spacing.lg, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 12, elevation: 8 },
   toastCheck: { fontSize: 13, color: '#10B981', fontWeight: typography.bold },
   toastText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+
+  skeletonWrap: { alignItems: 'center', paddingTop: 48 },
+  skeletonAvatar: { width: 72, height: 72, borderRadius: 36, backgroundColor: colors.borderLight, marginBottom: 16 },
+  skeletonLine: { width: 120, height: 14, borderRadius: 7, backgroundColor: colors.borderLight },
 
   settingsLinkCard: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.white, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 14, marginBottom: spacing.md },
   settingsLinkCardText: { fontSize: 14, fontWeight: typography.semibold, color: colors.black },

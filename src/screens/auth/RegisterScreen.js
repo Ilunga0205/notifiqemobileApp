@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { Button, Input, ErrorBanner, Divider, StepIndicator } from '../../components/UI';
+import { supabase } from '../../lib/supabase';
 
 const FREE_PROVIDERS = [
   'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
@@ -43,7 +44,6 @@ export default function RegisterScreen({ navigation }) {
     setForm(prev => ({ ...prev, [field]: value }));
   };
 
-  // Password strength — same logic as web
   const passwordStrength = form.password.length === 0 ? 0
     : form.password.length < 6 ? 1
     : form.password.length < 10 ? 2 : 3;
@@ -73,12 +73,73 @@ export default function RegisterScreen({ navigation }) {
       setError('Please fill in all fields.');
       return;
     }
+
     setLoading(true);
-    // Supabase auth will go here
-    setTimeout(() => {
+    setError('');
+
+    try {
+      const slug = form.orgName.trim().toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '');
+
+      // 1. Sign up
+      const { error: signUpError } = await supabase.auth.signUp({
+        email:    form.email.trim().toLowerCase(),
+        password: form.password,
+        options:  { data: { full_name: form.fullName.trim() } },
+      });
+      if (signUpError) throw signUpError;
+
+      // 2. Sign in immediately to get valid session before DB writes
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email:    form.email.trim().toLowerCase(),
+        password: form.password,
+      });
+      if (signInError) throw signInError;
+      const userId = signInData.user.id;
+
+      // 3. Create organisation
+      const { data: org, error: orgError } = await supabase
+        .from('organisations')
+        .insert({ name: form.orgName.trim(), slug })
+        .select()
+        .single();
+      if (orgError) {
+        if (orgError.code === '23505') throw new Error('That workspace name is already taken. Try another.');
+        throw orgError;
+      }
+
+      // 4. Admin membership
+      const { error: memberError } = await supabase
+        .from('memberships')
+        .insert({ org_id: org.id, user_id: userId, role: 'admin' });
+      if (memberError) throw memberError;
+
+      // 5. Default General department
+      const { data: dept, error: deptError } = await supabase
+        .from('departments')
+        .insert({ org_id: org.id, name: 'General', slug: 'general' })
+        .select()
+        .single();
+      if (deptError) throw deptError;
+
+      // 6. Add admin to General department
+      await supabase.from('department_members').insert({
+        department_id: dept.id,
+        user_id:       userId,
+      });
+
       setLoading(false);
       navigation.navigate('Onboarding');
-    }, 1000);
+
+    } catch (err) {
+      setLoading(false);
+      if (err.message?.includes('already registered')) {
+        setError('An account with this email already exists. Try signing in.');
+      } else {
+        setError(err.message);
+      }
+    }
   };
 
   return (
@@ -92,8 +153,7 @@ export default function RegisterScreen({ navigation }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-
-          {/* ── Logo nav ── */}
+          {/* Nav */}
           <View style={styles.nav}>
             <Text style={styles.logo}>
               notifi<Text style={styles.logoAccent}>qe</Text>
@@ -107,14 +167,8 @@ export default function RegisterScreen({ navigation }) {
           </View>
 
           <View style={styles.main}>
+            <StepIndicator steps={['Your account', 'Your workspace']} current={step} />
 
-            {/* Step indicator — matches web exactly */}
-            <StepIndicator
-              steps={['Your account', 'Your workspace']}
-              current={step}
-            />
-
-            {/* Header */}
             <View style={styles.header}>
               <Text style={styles.title}>
                 {step === 1 ? 'Create your account.' : 'Set up your workspace.'}
@@ -126,7 +180,6 @@ export default function RegisterScreen({ navigation }) {
               </Text>
             </View>
 
-            {/* Error */}
             {error ? (
               <>
                 <ErrorBanner message={error} />
@@ -137,7 +190,6 @@ export default function RegisterScreen({ navigation }) {
             {/* ── STEP 1 ── */}
             {step === 1 && (
               <View style={styles.form}>
-
                 <Input
                   label="Full name"
                   placeholder="Jane Smith"
@@ -162,7 +214,6 @@ export default function RegisterScreen({ navigation }) {
 
                 <View style={{ height: spacing.lg }} />
 
-                {/* Password with strength bar */}
                 <View>
                   <Text style={styles.label}>Password</Text>
                   <View style={styles.passwordWrapper}>
@@ -175,39 +226,23 @@ export default function RegisterScreen({ navigation }) {
                       onChangeText={v => handleChange('password', v)}
                       autoComplete="new-password"
                     />
-                    <TouchableOpacity
-                      style={styles.showBtn}
-                      onPress={() => setShowPassword(p => !p)}
-                    >
-                      <Text style={styles.showBtnText}>
-                        {showPassword ? 'Hide' : 'Show'}
-                      </Text>
+                    <TouchableOpacity style={styles.showBtn} onPress={() => setShowPassword(p => !p)}>
+                      <Text style={styles.showBtnText}>{showPassword ? 'Hide' : 'Show'}</Text>
                     </TouchableOpacity>
                   </View>
-
-                  {/* Strength bar */}
                   {form.password.length > 0 && (
                     <View style={styles.strengthContainer}>
                       <View style={styles.strengthBars}>
                         {[1, 2, 3].map(i => (
-                          <View
-                            key={i}
-                            style={[
-                              styles.strengthBar,
-                              { backgroundColor: passwordStrength >= i ? strengthColor : colors.borderLight },
-                            ]}
-                          />
+                          <View key={i} style={[styles.strengthBar, { backgroundColor: passwordStrength >= i ? strengthColor : colors.borderLight }]} />
                         ))}
                       </View>
-                      <Text style={[styles.strengthLabel, { color: strengthColor }]}>
-                        {strengthLabel}
-                      </Text>
+                      <Text style={[styles.strengthLabel, { color: strengthColor }]}>{strengthLabel}</Text>
                     </View>
                   )}
                 </View>
 
                 <View style={{ height: spacing.xl }} />
-
                 <Button label="Continue →" onPress={handleStep1} variant="primary" />
 
                 <View style={{ marginVertical: spacing.xxl }}>
@@ -218,28 +253,19 @@ export default function RegisterScreen({ navigation }) {
                   <Text style={styles.googleIcon}>G</Text>
                   <Text style={styles.googleText}>Continue with Google</Text>
                 </TouchableOpacity>
-
               </View>
             )}
 
             {/* ── STEP 2 ── */}
             {step === 2 && (
               <View style={styles.form}>
-
-                {/* Domain detection banner */}
                 {emailMeta && (
-                  <View style={[
-                    styles.detectionBanner,
-                    { backgroundColor: emailMeta.isFree ? '#FFFBEB' : colors.brandLight,
-                      borderColor: emailMeta.isFree ? '#FDE68A' : colors.brandBorder },
-                  ]}>
-                    <Text style={styles.detectionIcon}>
-                      {emailMeta.isFree ? '💡' : '✅'}
-                    </Text>
-                    <Text style={[
-                      styles.detectionText,
-                      { color: emailMeta.isFree ? colors.warning : colors.brand },
-                    ]}>
+                  <View style={[styles.detectionBanner, {
+                    backgroundColor: emailMeta.isFree ? '#FFFBEB' : colors.brandLight,
+                    borderColor: emailMeta.isFree ? '#FDE68A' : colors.brandBorder,
+                  }]}>
+                    <Text style={styles.detectionIcon}>{emailMeta.isFree ? '💡' : '✅'}</Text>
+                    <Text style={[styles.detectionText, { color: emailMeta.isFree ? colors.warning : colors.brand }]}>
                       {emailMeta.isFree
                         ? "Looks like a personal email — no problem. Just enter your organisation name below."
                         : `We detected your domain (${emailMeta.domain}). We've pre-filled your organisation name.`}
@@ -259,7 +285,6 @@ export default function RegisterScreen({ navigation }) {
 
                 <View style={{ height: spacing.lg }} />
 
-                {/* Team size selector */}
                 <View>
                   <Text style={styles.label}>Team size</Text>
                   <View style={styles.sizeGrid}>
@@ -267,15 +292,9 @@ export default function RegisterScreen({ navigation }) {
                       <TouchableOpacity
                         key={size}
                         onPress={() => { setError(''); handleChange('orgSize', size); }}
-                        style={[
-                          styles.sizeBtn,
-                          form.orgSize === size && styles.sizeBtnActive,
-                        ]}
+                        style={[styles.sizeBtn, form.orgSize === size && styles.sizeBtnActive]}
                       >
-                        <Text style={[
-                          styles.sizeBtnText,
-                          form.orgSize === size && styles.sizeBtnTextActive,
-                        ]}>
+                        <Text style={[styles.sizeBtnText, form.orgSize === size && styles.sizeBtnTextActive]}>
                           {size}
                         </Text>
                       </TouchableOpacity>
@@ -285,7 +304,6 @@ export default function RegisterScreen({ navigation }) {
 
                 <View style={{ height: spacing.lg }} />
 
-                {/* What happens next card */}
                 <View style={styles.nextCard}>
                   <Text style={styles.nextCardTitle}>What happens next</Text>
                   {[
@@ -302,14 +320,8 @@ export default function RegisterScreen({ navigation }) {
 
                 <View style={{ height: spacing.xl }} />
 
-                {/* Back + Submit row */}
                 <View style={styles.stepBtns}>
-                  <Button
-                    label="← Back"
-                    onPress={() => { setStep(1); setError(''); setEmailMeta(null); }}
-                    variant="outline"
-                    style={{ flex: 1 }}
-                  />
+                  <Button label="← Back" onPress={() => { setStep(1); setError(''); setEmailMeta(null); }} variant="outline" style={{ flex: 1 }} />
                   <Button
                     label={loading ? 'Creating workspace...' : 'Create workspace →'}
                     onPress={handleSubmit}
@@ -318,18 +330,15 @@ export default function RegisterScreen({ navigation }) {
                     style={{ flex: 2 }}
                   />
                 </View>
-
               </View>
             )}
 
-            {/* Footer */}
             <Text style={styles.footer}>
               By signing up you agree to our{' '}
               <Text style={styles.footerLink}>Terms</Text>
               {' '}and{' '}
               <Text style={styles.footerLink}>Privacy Policy</Text>.
             </Text>
-
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -338,247 +347,44 @@ export default function RegisterScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: colors.white,
-  },
-  scroll: {
-    flexGrow: 1,
-  },
-
-  // Nav
-  nav: {
-    height: 64,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.page,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderLight,
-  },
-  logo: {
-    fontSize: typography.xl,
-    fontWeight: typography.black,
-    letterSpacing: -0.5,
-    color: colors.black,
-  },
-  logoAccent: {
-    color: colors.brand,
-  },
-  navText: {
-    fontSize: typography.base,
-    color: colors.muted,
-  },
-  navLink: {
-    color: colors.brand,
-    fontWeight: typography.semibold,
-  },
-
-  // Main
-  main: {
-    flex: 1,
-    paddingHorizontal: spacing.page,
-    paddingTop: spacing.xxxl,
-    paddingBottom: spacing.xxxl,
-    maxWidth: 420,
-    width: '100%',
-    alignSelf: 'center',
-  },
-  form: {
-    width: '100%',
-  },
-
-  // Header
-  header: {
-    marginBottom: spacing.xxxl,
-  },
-  title: {
-    fontSize: typography.h1,
-    fontWeight: typography.black,
-    letterSpacing: -1,
-    color: colors.black,
-    marginBottom: spacing.sm,
-  },
-  subtitle: {
-    fontSize: typography.md,
-    color: colors.muted,
-    lineHeight: 24,
-  },
-
-  // Label
-  label: {
-    fontSize: typography.sm,
-    fontWeight: typography.semibold,
-    color: colors.body,
-    marginBottom: 6,
-  },
-
-  // Password
-  passwordWrapper: {
-    position: 'relative',
-  },
-  input: {
-    height: 48,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingRight: 64,
-    fontSize: typography.base,
-    color: colors.black,
-    backgroundColor: colors.white,
-  },
-  showBtn: {
-    position: 'absolute',
-    right: spacing.md,
-    top: 0,
-    bottom: 0,
-    justifyContent: 'center',
-  },
-  showBtnText: {
-    fontSize: typography.sm,
-    color: colors.subtle,
-    fontWeight: typography.medium,
-  },
-
-  // Strength bar
-  strengthContainer: {
-    marginTop: spacing.sm,
-  },
-  strengthBars: {
-    flexDirection: 'row',
-    gap: 4,
-    marginBottom: 4,
-  },
-  strengthBar: {
-    flex: 1,
-    height: 3,
-    borderRadius: 2,
-  },
-  strengthLabel: {
-    fontSize: typography.xs,
-    fontWeight: typography.bold,
-  },
-
-  // Google
-  googleBtn: {
-    height: 48,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.white,
-  },
-  googleIcon: {
-    fontSize: typography.lg,
-    fontWeight: typography.bold,
-    color: '#4285F4',
-  },
-  googleText: {
-    fontSize: typography.base,
-    fontWeight: typography.semibold,
-    color: colors.body,
-  },
-
-  // Domain detection banner
-  detectionBanner: {
-    borderWidth: 1,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: spacing.sm,
-  },
-  detectionIcon: {
-    fontSize: 16,
-  },
-  detectionText: {
-    flex: 1,
-    fontSize: typography.sm,
-    fontWeight: typography.medium,
-    lineHeight: 20,
-  },
-
-  // Team size
-  sizeGrid: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  sizeBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.white,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sizeBtnActive: {
-    borderColor: colors.brand,
-    backgroundColor: colors.brandLight,
-  },
-  sizeBtnText: {
-    fontSize: typography.xs,
-    fontWeight: typography.semibold,
-    color: colors.muted,
-  },
-  sizeBtnTextActive: {
-    color: colors.brand,
-  },
-
-  // What happens next card
-  nextCard: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.borderLight,
-    borderRadius: radius.md,
-    padding: spacing.lg,
-  },
-  nextCardTitle: {
-    fontSize: typography.xs,
-    fontWeight: typography.bold,
-    color: colors.body,
-    marginBottom: spacing.sm,
-  },
-  nextCardRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    alignItems: 'flex-start',
-    marginBottom: 6,
-  },
-  nextCardCheck: {
-    color: colors.brand,
-    fontWeight: typography.black,
-    fontSize: typography.xs,
-    marginTop: 1,
-  },
-  nextCardText: {
-    flex: 1,
-    fontSize: typography.xs,
-    color: colors.muted,
-    lineHeight: 18,
-  },
-
-  // Step buttons row
-  stepBtns: {
-    flexDirection: 'row',
-    gap: spacing.md,
-  },
-
-  // Footer
-  footer: {
-    textAlign: 'center',
-    fontSize: typography.xs,
-    color: colors.placeholder,
-    marginTop: spacing.xxl,
-    lineHeight: 20,
-  },
-  footerLink: {
-    color: colors.muted,
-    textDecorationLine: 'underline',
-  },
+  safe: { flex: 1, backgroundColor: colors.white },
+  scroll: { flexGrow: 1 },
+  nav: { height: 64, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.page, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  logo: { fontSize: typography.xl, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
+  logoAccent: { color: colors.brand },
+  navText: { fontSize: typography.base, color: colors.muted },
+  navLink: { color: colors.brand, fontWeight: typography.semibold },
+  main: { flex: 1, paddingHorizontal: spacing.page, paddingTop: spacing.xxxl, paddingBottom: spacing.xxxl, maxWidth: 420, width: '100%', alignSelf: 'center' },
+  form: { width: '100%' },
+  header: { marginBottom: spacing.xxxl },
+  title: { fontSize: typography.h1, fontWeight: typography.black, letterSpacing: -1, color: colors.black, marginBottom: spacing.sm },
+  subtitle: { fontSize: typography.md, color: colors.muted, lineHeight: 24 },
+  label: { fontSize: typography.sm, fontWeight: typography.semibold, color: colors.body, marginBottom: 6 },
+  passwordWrapper: { position: 'relative' },
+  input: { height: 48, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingRight: 64, fontSize: typography.base, color: colors.black, backgroundColor: colors.white },
+  showBtn: { position: 'absolute', right: spacing.md, top: 0, bottom: 0, justifyContent: 'center' },
+  showBtnText: { fontSize: typography.sm, color: colors.subtle, fontWeight: typography.medium },
+  strengthContainer: { marginTop: spacing.sm },
+  strengthBars: { flexDirection: 'row', gap: 4, marginBottom: 4 },
+  strengthBar: { flex: 1, height: 3, borderRadius: 2 },
+  strengthLabel: { fontSize: typography.xs, fontWeight: typography.bold },
+  googleBtn: { height: 48, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, backgroundColor: colors.white },
+  googleIcon: { fontSize: typography.lg, fontWeight: typography.bold, color: '#4285F4' },
+  googleText: { fontSize: typography.base, fontWeight: typography.semibold, color: colors.body },
+  detectionBanner: { borderWidth: 1, borderRadius: radius.md, padding: spacing.md, flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm },
+  detectionIcon: { fontSize: 16 },
+  detectionText: { flex: 1, fontSize: typography.sm, fontWeight: typography.medium, lineHeight: 20 },
+  sizeGrid: { flexDirection: 'row', gap: spacing.sm },
+  sizeBtn: { flex: 1, paddingVertical: 10, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center' },
+  sizeBtnActive: { borderColor: colors.brand, backgroundColor: colors.brandLight },
+  sizeBtnText: { fontSize: typography.xs, fontWeight: typography.semibold, color: colors.muted },
+  sizeBtnTextActive: { color: colors.brand },
+  nextCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.md, padding: spacing.lg },
+  nextCardTitle: { fontSize: typography.xs, fontWeight: typography.bold, color: colors.body, marginBottom: spacing.sm },
+  nextCardRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start', marginBottom: 6 },
+  nextCardCheck: { color: colors.brand, fontWeight: typography.black, fontSize: typography.xs, marginTop: 1 },
+  nextCardText: { flex: 1, fontSize: typography.xs, color: colors.muted, lineHeight: 18 },
+  stepBtns: { flexDirection: 'row', gap: spacing.md },
+  footer: { textAlign: 'center', fontSize: typography.xs, color: colors.placeholder, marginTop: spacing.xxl, lineHeight: 20 },
+  footerLink: { color: colors.muted, textDecorationLine: 'underline' },
 });
