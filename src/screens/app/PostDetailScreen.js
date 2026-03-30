@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
-  StyleSheet, SafeAreaView, Platform, StatusBar, KeyboardAvoidingView,
+  StyleSheet,  Platform, StatusBar, KeyboardAvoidingView,
 } from 'react-native';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';

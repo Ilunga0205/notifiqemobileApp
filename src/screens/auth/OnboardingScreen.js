@@ -2,13 +2,15 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
-  StyleSheet, SafeAreaView, Share, Platform,
+  StyleSheet,  Share, Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { colors, typography, spacing, radius, shadows, POST_TYPES } from '../../lib/tokens';
 import { Button, StepIndicator, Divider } from '../../components/UI';
 import { supabase } from '../../lib/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { markOnboardingDone } from '../../services/auth.service';
 
 export default function OnboardingScreen({ navigation, completeOnboarding }) {
   const [step, setStep] = useState(1);
@@ -52,11 +54,8 @@ export default function OnboardingScreen({ navigation, completeOnboarding }) {
   }, []);
 
   const handleFinish = async () => {
-    if (completeOnboarding) {
-      await completeOnboarding();
-    } else {
-      await AsyncStorage.setItem('notifiqe_onboarding_done', 'true');
-    }
+    await markOnboardingDone();
+    if (completeOnboarding) await completeOnboarding();
   };
 
   const handleCopy = () => {

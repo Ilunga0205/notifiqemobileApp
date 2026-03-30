@@ -2,8 +2,9 @@
 import React, { useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
-  StyleSheet, SafeAreaView, Platform, StatusBar, Animated,
+  StyleSheet,  Platform, StatusBar, Animated,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 
 // ── DATA ──────────────────────────────────────────────────────────────────────

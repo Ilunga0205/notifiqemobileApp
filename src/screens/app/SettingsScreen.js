@@ -1,15 +1,17 @@
 // src/screens/app/SettingsScreen.js
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
-  StyleSheet, SafeAreaView, Modal, Pressable,
-  Platform, StatusBar, Switch,
+  StyleSheet,  Modal, Pressable,
+  Platform, StatusBar, Switch, Share,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
-
-// ── DATA ──────────────────────────────────────────────────────────────────────
-
-const IS_ADMIN = true;
+import { useApp } from '../../context/AppContext';
+import { updateOrgName, updateTimezone, regenerateInviteToken, buildInviteLink } from '../../services/org.service';
+import { logout } from '../../services/auth.service';
+import { supabase } from '../../lib/supabase';
 
 const TIMEZONES = [
   'Africa/Johannesburg', 'UTC', 'Europe/London', 'Europe/Paris',
@@ -19,7 +21,7 @@ const TIMEZONES = [
 
 const EXPIRY_OPTIONS = ['24 hours', '3 days', '7 days', '30 days', 'Never'];
 
-// ── HELPERS ───────────────────────────────────────────────────────────────────
+// ── Small components ──────────────────────────────────────────────────────────
 
 function Toast({ message }) {
   return (
@@ -84,23 +86,14 @@ function SettingsRow({ icon, label, description, danger, last, children }) {
   );
 }
 
-// ── TIMEZONE PICKER ───────────────────────────────────────────────────────────
-
 function TimezonePicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <TouchableOpacity
-        style={styles.pickerBtn}
-        onPress={() => setOpen(true)}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.pickerBtnText} numberOfLines={1}>
-          {value.replace('_', ' ')}
-        </Text>
+      <TouchableOpacity style={styles.pickerBtn} onPress={() => setOpen(true)} activeOpacity={0.8}>
+        <Text style={styles.pickerBtnText} numberOfLines={1}>{value.replace(/_/g, ' ')}</Text>
         <Text style={styles.pickerChevron}>›</Text>
       </TouchableOpacity>
-
       <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.pickerOverlay} onPress={() => setOpen(false)}>
           <Pressable style={styles.pickerSheet} onPress={e => e.stopPropagation()}>
@@ -108,15 +101,8 @@ function TimezonePicker({ value, onChange }) {
             <Text style={styles.pickerTitle}>Timezone</Text>
             <ScrollView showsVerticalScrollIndicator={false}>
               {TIMEZONES.map(tz => (
-                <TouchableOpacity
-                  key={tz}
-                  style={[styles.pickerOption, value === tz && styles.pickerOptionActive]}
-                  onPress={() => { onChange(tz); setOpen(false); }}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[styles.pickerOptionText, value === tz && styles.pickerOptionTextActive]}>
-                    {tz.replace('_', ' ')}
-                  </Text>
+                <TouchableOpacity key={tz} style={[styles.pickerOption, value === tz && styles.pickerOptionActive]} onPress={() => { onChange(tz); setOpen(false); }} activeOpacity={0.8}>
+                  <Text style={[styles.pickerOptionText, value === tz && styles.pickerOptionTextActive]}>{tz.replace(/_/g, ' ')}</Text>
                   {value === tz && <Text style={styles.pickerCheck}>✓</Text>}
                 </TouchableOpacity>
               ))}
@@ -129,8 +115,6 @@ function TimezonePicker({ value, onChange }) {
   );
 }
 
-// ── EXPIRY PICKER ─────────────────────────────────────────────────────────────
-
 function ExpiryPicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
   return (
@@ -139,19 +123,13 @@ function ExpiryPicker({ value, onChange }) {
         <Text style={styles.pickerBtnText}>{value}</Text>
         <Text style={styles.pickerChevron}>›</Text>
       </TouchableOpacity>
-
       <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.pickerOverlay} onPress={() => setOpen(false)}>
           <Pressable style={styles.pickerSheet} onPress={e => e.stopPropagation()}>
             <View style={styles.sheetHandle} />
             <Text style={styles.pickerTitle}>Link expiry</Text>
             {EXPIRY_OPTIONS.map(opt => (
-              <TouchableOpacity
-                key={opt}
-                style={[styles.pickerOption, value === opt && styles.pickerOptionActive]}
-                onPress={() => { onChange(opt); setOpen(false); }}
-                activeOpacity={0.8}
-              >
+              <TouchableOpacity key={opt} style={[styles.pickerOption, value === opt && styles.pickerOptionActive]} onPress={() => { onChange(opt); setOpen(false); }} activeOpacity={0.8}>
                 <Text style={[styles.pickerOptionText, value === opt && styles.pickerOptionTextActive]}>{opt}</Text>
                 {value === opt && <Text style={styles.pickerCheck}>✓</Text>}
               </TouchableOpacity>
@@ -164,34 +142,75 @@ function ExpiryPicker({ value, onChange }) {
   );
 }
 
-// ── MAIN SCREEN ───────────────────────────────────────────────────────────────
+// ── Main screen ───────────────────────────────────────────────────────────────
 
 export default function SettingsScreen({ navigation }) {
-  const [orgName,      setOrgName]      = useState('Acme Corp');
-  const [orgNameEdit,  setOrgNameEdit]  = useState(false);
-  const [orgNameDraft, setOrgNameDraft] = useState('');
-  const [timezone,     setTimezone]     = useState('Africa/Johannesburg');
-  const [inviteCopied, setInviteCopied] = useState(false);
-  const [linkExpiry,   setLinkExpiry]   = useState('7 days');
-  const [toast,        setToast]        = useState(null);
-  const [confirmModal, setConfirmModal] = useState(null);
+  // ✅ All org data from AppContext — no Supabase call needed
+  const { org, orgId, orgName, isAdmin, updateOrg, user } = useApp();
+
+  const [orgNameEdit,   setOrgNameEdit]   = useState(false);
+  const [orgNameDraft,  setOrgNameDraft]  = useState('');
+  const [timezone,      setTimezone]      = useState(org?.timezone || 'Africa/Johannesburg');
+  const [inviteToken,   setInviteToken]   = useState(org?.invite_token || '');
+
+  // ✅ Sync from AppContext when org loads (handles cache-first async load)
+  useEffect(() => {
+    if (org?.timezone)     setTimezone(org.timezone);
+    if (org?.invite_token) setInviteToken(org.invite_token);
+  }, [org?.id, org?.timezone, org?.invite_token]);
+  const [inviteCopied,  setInviteCopied]  = useState(false);
+  const [linkExpiry,    setLinkExpiry]    = useState('7 days');
+  const [toast,         setToast]         = useState(null);
+  const [confirmModal,  setConfirmModal]  = useState(null);
   const [notifications, setNotifications] = useState({
     announcements: true,
     mentions:      true,
     weeklyDigest:  false,
   });
 
-  const inviteLink = 'https://app.notifiqe.com/join/acme-corp/abc123';
+  const inviteLink = buildInviteLink(org?.slug, inviteToken);
+
+  // Load notification prefs from AsyncStorage on mount
+  useEffect(() => {
+    AsyncStorage.getItem('notifiqe_notifications').then(raw => {
+      if (raw) setNotifications(JSON.parse(raw));
+    });
+  }, []);
 
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   };
 
-  const saveOrgName = () => {
-    if (orgNameDraft.trim()) { setOrgName(orgNameDraft.trim()); showToast('Organisation name saved'); }
-    setOrgNameEdit(false);
+  // ── Save org name ─────────────────────────────────────────────────────────
+
+  const saveOrgName = async () => {
+    const trimmed = orgNameDraft.trim();
+    if (!trimmed || !orgId) return;
+    try {
+      await updateOrgName(orgId, trimmed);
+      await updateOrg({ name: trimmed }); // update AppContext cache
+      setOrgNameEdit(false);
+      showToast('Organisation name saved');
+    } catch (err) {
+      showToast('Failed to save name');
+    }
   };
+
+  // ── Save timezone ─────────────────────────────────────────────────────────
+
+  const saveTimezone = async (tz) => {
+    setTimezone(tz);
+    try {
+      await updateTimezone(orgId, tz);
+      await updateOrg({ timezone: tz }); // update AppContext cache
+      showToast('Timezone saved');
+    } catch (err) {
+      showToast('Failed to save timezone');
+    }
+  };
+
+  // ── Copy invite link ──────────────────────────────────────────────────────
 
   const handleCopy = () => {
     setInviteCopied(true);
@@ -199,9 +218,79 @@ export default function SettingsScreen({ navigation }) {
     showToast('Invite link copied');
   };
 
-  const toggleNotif = (key) => {
-    setNotifications(p => ({ ...p, [key]: !p[key] }));
+  // ── Share invite link ─────────────────────────────────────────────────────
+
+  const handleShare = async () => {
+    try {
+      await Share.share({
+        message: `Join ${orgName} on Notifiqe: ${inviteLink}`,
+        url: inviteLink,
+      });
+    } catch (e) {}
+  };
+
+  // ── Regenerate invite link ────────────────────────────────────────────────
+
+  const handleRegenerateLink = async () => {
+    try {
+      const newToken = await regenerateInviteToken(orgId);
+      setInviteToken(newToken);
+      await updateOrg({ invite_token: newToken }); // update AppContext cache
+      setConfirmModal(null);
+      showToast('New invite link generated');
+    } catch (err) {
+      showToast('Failed to regenerate link');
+    }
+  };
+
+  // ── Notification toggles (device only — no DB) ────────────────────────────
+
+  const toggleNotif = async (key) => {
+    const updated = { ...notifications, [key]: !notifications[key] };
+    setNotifications(updated);
+    await AsyncStorage.setItem('notifiqe_notifications', JSON.stringify(updated));
     showToast('Notification preference saved');
+  };
+
+  // ── Delete workspace ──────────────────────────────────────────────────────
+  // Deletes everything: posts, members, departments, org — then signs out
+  // Members who try to log in will land on NoWorkspace screen
+
+  const handleDeleteWorkspace = async () => {
+    setConfirmModal(null);
+    try {
+      // Check for other active members first
+      const { data: otherMembers } = await supabase
+        .from('memberships')
+        .select('id')
+        .eq('org_id', orgId)
+        .eq('status', 'active')
+        .neq('user_id', user?.id)
+        .limit(1);
+
+      if (otherMembers?.length > 0) {
+        showToast('Remove all members before deleting the workspace.');
+        return;
+      }
+
+      // Safe to delete — only admin remains
+      const { data: depts } = await supabase
+        .from('departments').select('id').eq('org_id', orgId);
+      const deptIds = (depts || []).map(d => d.id);
+      if (deptIds.length > 0) {
+        await supabase.from('department_members').delete().in('department_id', deptIds);
+      }
+      await supabase.from('departments').delete().eq('org_id', orgId);
+      await supabase.from('memberships').delete().eq('org_id', orgId);
+      await supabase.from('organisations').delete().eq('id', orgId);
+
+      // Sign out → Login screen
+      await logout();
+
+    } catch (err) {
+      showToast('Failed to delete workspace. Please try again.');
+      console.warn('Delete workspace error:', err.message);
+    }
   };
 
   return (
@@ -239,39 +328,25 @@ export default function SettingsScreen({ navigation }) {
         </View>
       )}
 
-      <ScrollView
-        style={styles.scroll}
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Page title */}
+      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+
         <View style={styles.pageHeader}>
           <Text style={styles.pageTitle}>Settings</Text>
           <Text style={styles.pageSub}>Manage your workspace</Text>
         </View>
 
-        {/* ── Organisation ── */}
+        {/* Organisation */}
         <Section title="Organisation" description="How your workspace appears to your team.">
-          {/* Logo */}
           <SettingsRow icon="↑" label="Workspace logo" description="Shown in the header and invite emails">
             <TouchableOpacity style={styles.uploadBtn} onPress={() => showToast('Logo upload coming soon')} activeOpacity={0.8}>
               <Text style={styles.uploadBtnText}>Upload</Text>
             </TouchableOpacity>
           </SettingsRow>
 
-          {/* Org name */}
           <SettingsRow icon="✎" label="Organisation name" description="Shown to all members">
             {orgNameEdit ? (
               <View style={styles.inlineEditRow}>
-                <TextInput
-                  style={styles.inlineInput}
-                  value={orgNameDraft}
-                  onChangeText={setOrgNameDraft}
-                  onSubmitEditing={saveOrgName}
-                  autoFocus
-                  returnKeyType="done"
-                />
+                <TextInput style={styles.inlineInput} value={orgNameDraft} onChangeText={setOrgNameDraft} onSubmitEditing={saveOrgName} autoFocus returnKeyType="done" />
                 <TouchableOpacity style={styles.inlineSave} onPress={saveOrgName} activeOpacity={0.85}>
                   <Text style={styles.inlineSaveText}>Save</Text>
                 </TouchableOpacity>
@@ -280,43 +355,30 @@ export default function SettingsScreen({ navigation }) {
                 </TouchableOpacity>
               </View>
             ) : (
-              <TouchableOpacity
-                style={styles.editBtn}
-                onPress={() => { setOrgNameDraft(orgName); setOrgNameEdit(true); }}
-                activeOpacity={0.8}
-              >
+              <TouchableOpacity style={styles.editBtn} onPress={() => { setOrgNameDraft(orgName); setOrgNameEdit(true); }} activeOpacity={0.8}>
                 <Text style={styles.editBtnText}>Edit</Text>
               </TouchableOpacity>
             )}
           </SettingsRow>
 
-          {/* Timezone */}
           <SettingsRow icon="🌐" label="Timezone" description="Used for calendar events" last>
-            <TimezonePicker value={timezone} onChange={(tz) => { setTimezone(tz); showToast('Timezone saved'); }} />
+            <TimezonePicker value={timezone} onChange={saveTimezone} />
           </SettingsRow>
         </Section>
 
-        {/* ── Invite link ── */}
+        {/* Invite link */}
         <Section title="Invite link" description="Share this link to add people to your workspace.">
           <View style={styles.inviteSection}>
-            {/* Link display */}
             <View style={styles.inviteLinkRow}>
               <View style={styles.inviteLinkBox}>
                 <Text style={styles.inviteLinkIcon}>🔗</Text>
                 <Text style={styles.inviteLinkText} numberOfLines={1}>{inviteLink}</Text>
               </View>
-              <TouchableOpacity
-                style={[styles.copyBtn, inviteCopied && styles.copyBtnDone]}
-                onPress={handleCopy}
-                activeOpacity={0.85}
-              >
-                <Text style={[styles.copyBtnText, inviteCopied && styles.copyBtnTextDone]}>
-                  {inviteCopied ? '✓ Copied' : 'Copy'}
-                </Text>
+              <TouchableOpacity style={[styles.copyBtn, inviteCopied && styles.copyBtnDone]} onPress={handleCopy} activeOpacity={0.85}>
+                <Text style={[styles.copyBtnText, inviteCopied && styles.copyBtnTextDone]}>{inviteCopied ? '✓ Copied' : 'Copy'}</Text>
               </TouchableOpacity>
             </View>
 
-            {/* Expiry */}
             <View style={styles.expiryRow}>
               <View style={styles.expiryInfo}>
                 <Text style={styles.expiryLabel}>Link expiry</Text>
@@ -325,16 +387,13 @@ export default function SettingsScreen({ navigation }) {
               <ExpiryPicker value={linkExpiry} onChange={(v) => { setLinkExpiry(v); showToast('Expiry updated'); }} />
             </View>
 
-            {/* Regenerate */}
+            <TouchableOpacity style={[styles.regenerateBtn, { marginBottom: spacing.sm, borderColor: colors.brand }]} onPress={handleShare} activeOpacity={0.8}>
+              <Text style={[styles.regenerateBtnText, { color: colors.brand }]}>Share invite link</Text>
+            </TouchableOpacity>
+
             <TouchableOpacity
               style={styles.regenerateBtn}
-              onPress={() => setConfirmModal({
-                title: 'Regenerate invite link?',
-                body: 'The current link will stop working immediately. Anyone who hasn\'t joined yet will need the new link.',
-                confirmLabel: 'Regenerate',
-                danger: false,
-                onConfirm: () => { setConfirmModal(null); showToast('New invite link generated'); },
-              })}
+              onPress={() => setConfirmModal({ title: 'Regenerate invite link?', body: "The current link will stop working immediately. Anyone who hasn't joined yet will need the new link.", confirmLabel: 'Regenerate', danger: false, onConfirm: handleRegenerateLink })}
               activeOpacity={0.8}
             >
               <Text style={styles.regenerateBtnText}>↻  Regenerate link</Text>
@@ -342,7 +401,7 @@ export default function SettingsScreen({ navigation }) {
           </View>
         </Section>
 
-        {/* ── Notifications ── */}
+        {/* Notifications */}
         <Section title="Notifications" description="Choose what you get notified about.">
           {[
             { key: 'announcements', label: 'Announcements', desc: 'Get notified of new announcements' },
@@ -350,29 +409,18 @@ export default function SettingsScreen({ navigation }) {
             { key: 'weeklyDigest',  label: 'Weekly digest', desc: 'Summary of activity every Monday morning' },
           ].map((item, i, arr) => (
             <SettingsRow key={item.key} label={item.label} description={item.desc} last={i === arr.length - 1}>
-              <Switch
-                value={notifications[item.key]}
-                onValueChange={() => toggleNotif(item.key)}
-                trackColor={{ false: colors.border, true: colors.brand }}
-                thumbColor={colors.white}
-              />
+              <Switch value={notifications[item.key]} onValueChange={() => toggleNotif(item.key)} trackColor={{ false: colors.border, true: colors.brand }} thumbColor={colors.white} />
             </SettingsRow>
           ))}
         </Section>
 
-        {/* ── Danger zone ── */}
-        {IS_ADMIN && (
+        {/* Danger zone — admin only */}
+        {isAdmin && (
           <Section title="Danger zone" description="These actions cannot be undone.">
             <SettingsRow icon="🗑" label="Delete workspace" description="Permanently delete this workspace and all its data" danger last>
               <TouchableOpacity
                 style={styles.deleteBtn}
-                onPress={() => setConfirmModal({
-                  title: 'Delete workspace?',
-                  body: `This will permanently delete "${orgName}" and all posts, members, and data. This cannot be undone.`,
-                  confirmLabel: 'Delete workspace',
-                  danger: true,
-                  onConfirm: () => setConfirmModal(null),
-                })}
+                onPress={() => setConfirmModal({ title: 'Delete workspace?', body: `This will permanently delete "${orgName}" and all posts, members, and data. This cannot be undone.`, confirmLabel: 'Delete workspace', danger: true, onConfirm: handleDeleteWorkspace })}
                 activeOpacity={0.85}
               >
                 <Text style={styles.deleteBtnText}>Delete</Text>
@@ -401,113 +449,90 @@ export default function SettingsScreen({ navigation }) {
   );
 }
 
-// ── STYLES ────────────────────────────────────────────────────────────────────
+// ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#F3F4F6' },
-
-  headerBlock: { backgroundColor: colors.white, paddingTop: StatusBar.currentHeight, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  appHeader: { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.page, backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  backBtn: { width: 36, alignItems: 'flex-start', justifyContent: 'center' },
-  backBtnText: { fontSize: 28, color: colors.brand, fontWeight: '300', lineHeight: 32 },
-  appHeaderCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, justifyContent: 'center' },
-  appLogo: { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
-  appLogoAccent: { color: colors.brand },
-  appSep: { fontSize: 14, color: colors.border },
-  appOrg: { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
-
-  scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: spacing.page, paddingTop: spacing.lg },
-
-  pageHeader: { marginBottom: spacing.lg },
-  pageTitle: { fontSize: 22, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black, marginBottom: 3 },
-  pageSub: { fontSize: 13, color: colors.subtle },
-
-  // Section
-  section: { marginBottom: spacing.lg },
-  sectionHeader: { marginBottom: spacing.sm },
-  sectionTitle: { fontSize: 14, fontWeight: typography.bold, color: colors.black, marginBottom: 2 },
-  sectionDesc: { fontSize: 12, color: colors.subtle },
-  sectionCard: { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.xl, overflow: 'hidden' },
-
-  // Settings row
-  settingsRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.md, paddingVertical: 14, minHeight: 60 },
-  settingsRowBorder: { borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  rowIcon: { width: 32, height: 32, borderRadius: 8, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  rowIconDanger: { backgroundColor: '#FEF2F2' },
-  rowIconText: { fontSize: 14, color: colors.muted },
-  rowInfo: { flex: 1, minWidth: 0 },
-  rowLabel: { fontSize: 14, fontWeight: typography.semibold, color: colors.black },
-  rowDesc: { fontSize: 12, color: colors.subtle, marginTop: 2 },
-  rowAction: { flexShrink: 0 },
-
-  // Inline edit
-  inlineEditRow: { flexDirection: 'row', gap: 6 },
-  inlineInput: { borderWidth: 1, borderColor: colors.brand, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, fontSize: 13, color: colors.black, width: 120, minHeight: 36 },
-  inlineSave: { backgroundColor: colors.brand, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, justifyContent: 'center' },
-  inlineSaveText: { fontSize: 12, fontWeight: typography.semibold, color: colors.white },
-  inlineCancel: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, justifyContent: 'center' },
-  inlineCancelText: { fontSize: 12, color: colors.muted },
-  editBtn: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
-  editBtnText: { fontSize: 12, fontWeight: typography.semibold, color: colors.muted },
-  uploadBtn: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
-  uploadBtnText: { fontSize: 12, fontWeight: typography.semibold, color: colors.muted },
-
-  // Picker button
-  pickerBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, maxWidth: 140 },
-  pickerBtnText: { fontSize: 12, color: '#374151', fontWeight: typography.medium, flex: 1 },
-  pickerChevron: { fontSize: 14, color: colors.muted },
-
-  // Picker sheet
-  pickerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  pickerSheet: { backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '60%', paddingBottom: 32 },
-  sheetHandle: { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 8 },
-  pickerTitle: { fontSize: 16, fontWeight: typography.bold, color: colors.black, paddingHorizontal: spacing.page, paddingBottom: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  pickerOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.page, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  root:               { flex: 1, backgroundColor: '#F3F4F6' },
+  headerBlock:        { backgroundColor: colors.white, paddingTop: StatusBar.currentHeight, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  appHeader:          { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.page, backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  backBtn:            { width: 36, alignItems: 'flex-start', justifyContent: 'center' },
+  backBtnText:        { fontSize: 28, color: colors.brand, fontWeight: '300', lineHeight: 32 },
+  appHeaderCenter:    { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, justifyContent: 'center' },
+  appLogo:            { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
+  appLogoAccent:      { color: colors.brand },
+  appSep:             { fontSize: 14, color: colors.border },
+  appOrg:             { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
+  scroll:             { flex: 1 },
+  scrollContent:      { paddingHorizontal: spacing.page, paddingTop: spacing.lg },
+  pageHeader:         { marginBottom: spacing.lg },
+  pageTitle:          { fontSize: 22, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black, marginBottom: 3 },
+  pageSub:            { fontSize: 13, color: colors.subtle },
+  section:            { marginBottom: spacing.lg },
+  sectionHeader:      { marginBottom: spacing.sm },
+  sectionTitle:       { fontSize: 14, fontWeight: typography.bold, color: colors.black, marginBottom: 2 },
+  sectionDesc:        { fontSize: 12, color: colors.subtle },
+  sectionCard:        { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.xl, overflow: 'hidden' },
+  settingsRow:        { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.md, paddingVertical: 14, minHeight: 60 },
+  settingsRowBorder:  { borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  rowIcon:            { width: 32, height: 32, borderRadius: 8, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  rowIconDanger:      { backgroundColor: '#FEF2F2' },
+  rowIconText:        { fontSize: 14, color: colors.muted },
+  rowInfo:            { flex: 1, minWidth: 0 },
+  rowLabel:           { fontSize: 14, fontWeight: typography.semibold, color: colors.black },
+  rowDesc:            { fontSize: 12, color: colors.subtle, marginTop: 2 },
+  rowAction:          { flexShrink: 0 },
+  inlineEditRow:      { flexDirection: 'row', gap: 6 },
+  inlineInput:        { borderWidth: 1, borderColor: colors.brand, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, fontSize: 13, color: colors.black, width: 120, minHeight: 36 },
+  inlineSave:         { backgroundColor: colors.brand, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, justifyContent: 'center' },
+  inlineSaveText:     { fontSize: 12, fontWeight: typography.semibold, color: colors.white },
+  inlineCancel:       { borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, justifyContent: 'center' },
+  inlineCancelText:   { fontSize: 12, color: colors.muted },
+  editBtn:            { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
+  editBtnText:        { fontSize: 12, fontWeight: typography.semibold, color: colors.muted },
+  uploadBtn:          { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
+  uploadBtnText:      { fontSize: 12, fontWeight: typography.semibold, color: colors.muted },
+  pickerBtn:          { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, maxWidth: 140 },
+  pickerBtnText:      { fontSize: 12, color: '#374151', fontWeight: typography.medium, flex: 1 },
+  pickerChevron:      { fontSize: 14, color: colors.muted },
+  pickerOverlay:      { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  pickerSheet:        { backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '60%', paddingBottom: 32 },
+  sheetHandle:        { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 8 },
+  pickerTitle:        { fontSize: 16, fontWeight: typography.bold, color: colors.black, paddingHorizontal: spacing.page, paddingBottom: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  pickerOption:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.page, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
   pickerOptionActive: { backgroundColor: '#EFF6FF' },
-  pickerOptionText: { fontSize: 14, color: '#374151', fontWeight: typography.medium },
+  pickerOptionText:   { fontSize: 14, color: '#374151', fontWeight: typography.medium },
   pickerOptionTextActive: { color: colors.brand, fontWeight: typography.semibold },
-  pickerCheck: { fontSize: 14, color: colors.brand, fontWeight: typography.bold },
-
-  // Invite section
-  inviteSection: { padding: spacing.md },
-  inviteLinkRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
-  inviteLinkBox: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, minHeight: 44 },
-  inviteLinkIcon: { fontSize: 12 },
-  inviteLinkText: { flex: 1, fontSize: 12, color: colors.muted },
-  copyBtn: { backgroundColor: colors.brand, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, justifyContent: 'center', minWidth: 80, alignItems: 'center' },
-  copyBtnDone: { backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#BBF7D0' },
-  copyBtnText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
-  copyBtnTextDone: { color: '#065F46' },
-  expiryRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.sm },
-  expiryInfo: { flex: 1, marginRight: spacing.md },
-  expiryLabel: { fontSize: 13, fontWeight: typography.semibold, color: '#374151' },
-  expiryDesc: { fontSize: 11, color: colors.subtle, marginTop: 2 },
-  regenerateBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: spacing.md, alignItems: 'center' },
-  regenerateBtnText: { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
-
-  // Danger
-  deleteBtn: { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
-  deleteBtnText: { fontSize: 12, fontWeight: typography.semibold, color: '#DC2626' },
-
-  // Quick links
-  quickLinks: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingBottom: spacing.md },
-  quickLink: { fontSize: 13, fontWeight: typography.semibold, color: colors.brand },
-  quickLinkSep: { fontSize: 13, color: colors.border },
-
-  // Toast
-  toast: { position: 'absolute', bottom: 80, alignSelf: 'center', backgroundColor: '#111827', borderRadius: 100, paddingHorizontal: spacing.lg, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 12, elevation: 8 },
-  toastCheck: { fontSize: 13, color: '#10B981', fontWeight: typography.bold },
-  toastText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
-
-  // Confirm modal
-  confirmOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
-  confirmBox: { backgroundColor: colors.white, borderRadius: 20, padding: spacing.xl, width: '100%', maxWidth: 380 },
-  confirmTitle: { fontSize: 16, fontWeight: typography.black, color: colors.black, marginBottom: spacing.sm },
-  confirmBody: { fontSize: 14, color: colors.muted, lineHeight: 21, marginBottom: spacing.lg },
-  confirmBtns: { flexDirection: 'row', gap: spacing.sm },
-  confirmCancel: { flex: 1, paddingVertical: 12, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center' },
-  confirmCancelText: { fontSize: 14, fontWeight: typography.semibold, color: colors.muted },
-  confirmAction: { flex: 1, paddingVertical: 12, borderRadius: radius.md, alignItems: 'center' },
-  confirmActionText: { fontSize: 14, fontWeight: typography.semibold, color: colors.white },
+  pickerCheck:        { fontSize: 14, color: colors.brand, fontWeight: typography.bold },
+  inviteSection:      { padding: spacing.md },
+  inviteLinkRow:      { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
+  inviteLinkBox:      { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, minHeight: 44 },
+  inviteLinkIcon:     { fontSize: 12 },
+  inviteLinkText:     { flex: 1, fontSize: 12, color: colors.muted },
+  copyBtn:            { backgroundColor: colors.brand, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, justifyContent: 'center', minWidth: 80, alignItems: 'center' },
+  copyBtnDone:        { backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#BBF7D0' },
+  copyBtnText:        { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  copyBtnTextDone:    { color: '#065F46' },
+  expiryRow:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.sm },
+  expiryInfo:         { flex: 1, marginRight: spacing.md },
+  expiryLabel:        { fontSize: 13, fontWeight: typography.semibold, color: '#374151' },
+  expiryDesc:         { fontSize: 11, color: colors.subtle, marginTop: 2 },
+  regenerateBtn:      { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: spacing.md, alignItems: 'center', marginBottom: spacing.sm },
+  regenerateBtnText:  { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
+  deleteBtn:          { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
+  deleteBtnText:      { fontSize: 12, fontWeight: typography.semibold, color: '#DC2626' },
+  quickLinks:         { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingBottom: spacing.md },
+  quickLink:          { fontSize: 13, fontWeight: typography.semibold, color: colors.brand },
+  quickLinkSep:       { fontSize: 13, color: colors.border },
+  toast:              { position: 'absolute', bottom: 80, alignSelf: 'center', backgroundColor: '#111827', borderRadius: 100, paddingHorizontal: spacing.lg, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 12, elevation: 8 },
+  toastCheck:         { fontSize: 13, color: '#10B981', fontWeight: typography.bold },
+  toastText:          { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  confirmOverlay:     { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
+  confirmBox:         { backgroundColor: colors.white, borderRadius: 20, padding: spacing.xl, width: '100%', maxWidth: 380 },
+  confirmTitle:       { fontSize: 16, fontWeight: typography.black, color: colors.black, marginBottom: spacing.sm },
+  confirmBody:        { fontSize: 14, color: colors.muted, lineHeight: 21, marginBottom: spacing.lg },
+  confirmBtns:        { flexDirection: 'row', gap: spacing.sm },
+  confirmCancel:      { flex: 1, paddingVertical: 12, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center' },
+  confirmCancelText:  { fontSize: 14, fontWeight: typography.semibold, color: colors.muted },
+  confirmAction:      { flex: 1, paddingVertical: 12, borderRadius: radius.md, alignItems: 'center' },
+  confirmActionText:  { fontSize: 14, fontWeight: typography.semibold, color: colors.white },
 });

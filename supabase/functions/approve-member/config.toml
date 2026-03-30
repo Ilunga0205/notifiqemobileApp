@@ -1,0 +1,2 @@
+[functions.approve-member]
+verify_jwt = false

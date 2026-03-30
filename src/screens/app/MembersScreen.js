@@ -1,54 +1,37 @@
 // src/screens/app/MembersScreen.js
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
   StyleSheet, SafeAreaView, Modal, Pressable,
-  KeyboardAvoidingView, Platform, StatusBar, FlatList,
+  KeyboardAvoidingView, Platform, StatusBar, Share, Alert,
 } from 'react-native';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
+import { useApp } from '../../context/AppContext';
+import { supabase } from '../../lib/supabase';
+import {
+  getMembers, getPendingRequests, getDepartments,
+  updateMember, removeMember, approveRequest, declineRequest,
+  addDepartment, renameDepartment, deleteDepartment,
+} from '../../services/member.service';
+import { buildInviteLink } from '../../services/org.service';
 
-// ── MOCK DATA ─────────────────────────────────────────────────────────────────
-
-const CURRENT_USER = { user_id: '1', role: 'admin' };
-
-const MOCK_DEPARTMENTS = [
-  { id: 'd1', name: 'General'    },
-  { id: 'd2', name: 'Management' },
-  { id: 'd3', name: 'Dev Team'   },
-  { id: 'd4', name: 'Finance'    },
-];
-
-const MOCK_MEMBERS = [
-  { user_id: '1', membership_id: 'm1', full_name: 'Sarah M.', initials: 'SM', avatar_color: '#1D4ED8', email: 'sarah@acme.com', role: 'admin',  status: 'active', joined_at: '2024-01-10', department_ids: ['d1','d2','d4'], departments: [{ id: 'd1', name: 'General' },{ id: 'd2', name: 'Management' },{ id: 'd4', name: 'Finance' }] },
-  { user_id: '2', membership_id: 'm2', full_name: 'James K.', initials: 'JK', avatar_color: '#065F46', email: 'james@acme.com', role: 'admin',  status: 'leave',  joined_at: '2024-01-15', department_ids: ['d1','d2'], departments: [{ id: 'd1', name: 'General' },{ id: 'd2', name: 'Management' }] },
-  { user_id: '3', membership_id: 'm3', full_name: 'David O.', initials: 'DO', avatar_color: '#5B21B6', email: 'david@acme.com', role: 'member', status: 'active', joined_at: '2024-02-01', department_ids: ['d1','d3'], departments: [{ id: 'd1', name: 'General' },{ id: 'd3', name: 'Dev Team' }] },
-  { user_id: '4', membership_id: 'm4', full_name: 'Priya N.', initials: 'PN', avatar_color: '#9D174D', email: 'priya@acme.com', role: 'member', status: 'leave',  joined_at: '2024-02-10', department_ids: ['d1','d3'], departments: [{ id: 'd1', name: 'General' },{ id: 'd3', name: 'Dev Team' }] },
-  { user_id: '5', membership_id: 'm5', full_name: 'Tom R.',   initials: 'TR', avatar_color: '#92400E', email: 'tom@acme.com',   role: 'member', status: 'active', joined_at: '2024-03-01', department_ids: ['d1','d4'], departments: [{ id: 'd1', name: 'General' },{ id: 'd4', name: 'Finance' }] },
-  { user_id: '6', membership_id: 'm6', full_name: 'Ben A.',   initials: 'BA', avatar_color: '#0369A1', email: 'ben@acme.com',   role: 'member', status: 'active', joined_at: '2024-03-15', department_ids: ['d1','d3'], departments: [{ id: 'd1', name: 'General' },{ id: 'd3', name: 'Dev Team' }] },
-];
-
-const MOCK_PENDING = [
-  { membership_id: 'p1', full_name: 'Anna T.',  initials: 'AT', email: 'anna@acme.com'  },
-  { membership_id: 'p2', full_name: 'Mark D.',  initials: 'MD', email: 'mark@acme.com'  },
-];
-
-// ── HELPERS ───────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function Avatar({ initials, size = 36, color }) {
   return (
     <View style={[styles.avatar, {
       width: size, height: size, borderRadius: size / 2,
       backgroundColor: color ? color + '18' : '#EFF6FF',
-      borderColor: color ? color + '35' : '#BFDBFE',
+      borderColor:     color ? color + '35' : '#BFDBFE',
     }]}>
       <Text style={[styles.avatarText, { fontSize: size * 0.33, color: color || colors.brand }]}>
-        {initials}
+        {initials || '?'}
       </Text>
     </View>
   );
 }
 
-// ── PENDING ROW ───────────────────────────────────────────────────────────────
+// ── Pending row ───────────────────────────────────────────────────────────────
 
 function PendingRow({ member, onApprove, onDecline }) {
   return (
@@ -62,46 +45,36 @@ function PendingRow({ member, onApprove, onDecline }) {
         <TouchableOpacity style={styles.declineBtn} onPress={() => onDecline(member.membership_id)} activeOpacity={0.8}>
           <Text style={styles.declineBtnText}>Decline</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.approveBtn} onPress={() => onApprove(member.membership_id)} activeOpacity={0.85}>
-          <Text style={styles.approveBtnText}>Approve</Text>
+        <TouchableOpacity
+          style={[styles.approveBtn, member.approving && { opacity: 0.6 }]}
+          onPress={() => !member.approving && onApprove(member.membership_id)}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.approveBtnText}>{member.approving ? '...' : 'Approve'}</Text>
         </TouchableOpacity>
       </View>
     </View>
   );
 }
 
-// ── MEMBER ROW ────────────────────────────────────────────────────────────────
+// ── Member row ────────────────────────────────────────────────────────────────
 
 function MemberRow({ member, onPress }) {
   const isOnLeave = member.status === 'leave';
   return (
     <TouchableOpacity style={styles.memberRow} onPress={onPress} activeOpacity={0.8}>
-      {/* Avatar with leave ring */}
       <View style={styles.memberAvatarWrap}>
         <Avatar initials={member.initials} size={42} color={member.avatar_color} />
         {isOnLeave && <View style={styles.leaveRing} />}
       </View>
-
       <View style={styles.memberInfo}>
-        {/* Name + badges */}
         <View style={styles.memberNameRow}>
           <Text style={styles.memberName}>{member.full_name}</Text>
-          {member.role === 'admin' && (
-            <View style={styles.adminBadge}>
-              <Text style={styles.adminBadgeText}>Admin</Text>
-            </View>
-          )}
-          {isOnLeave && (
-            <View style={styles.leaveBadge}>
-              <Text style={styles.leaveBadgeText}>On leave</Text>
-            </View>
-          )}
+          {member.role === 'admin' && <View style={styles.adminBadge}><Text style={styles.adminBadgeText}>Admin</Text></View>}
+          {isOnLeave && <View style={styles.leaveBadge}><Text style={styles.leaveBadgeText}>On leave</Text></View>}
+          {member.status === 'invited' && <View style={styles.invitedBadge}><Text style={styles.invitedBadgeText}>Invited</Text></View>}
         </View>
-
-        {/* Email */}
         <Text style={styles.memberEmail} numberOfLines={1}>{member.email}</Text>
-
-        {/* Dept chips */}
         <View style={styles.memberDepts}>
           {member.departments.map(d => (
             <View key={d.id} style={styles.deptChip}>
@@ -110,22 +83,22 @@ function MemberRow({ member, onPress }) {
           ))}
         </View>
       </View>
-
       <Text style={styles.chevron}>›</Text>
     </TouchableOpacity>
   );
 }
 
-// ── MEMBER DETAIL SHEET ───────────────────────────────────────────────────────
+// ── Member detail sheet ───────────────────────────────────────────────────────
 
-function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate, onRemove }) {
+function MemberDetailSheet({ member, departments, adminCount, currentUserId, isAdmin, onClose, onUpdate, onRemove }) {
   const [role,          setRole]          = useState(member.role);
   const [memberDepts,   setMemberDepts]   = useState(member.department_ids || []);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [saving,        setSaving]        = useState(false);
 
-  const isSelf      = member.user_id === CURRENT_USER.user_id;
-  const isLastAdmin = member.role === 'admin' && adminCount <= 1;
-  const roleIsLocked = isSelf || isLastAdmin;
+  const isSelf       = member.user_id === currentUserId;
+  const isLastAdmin  = member.role === 'admin' && adminCount <= 1;
+  const roleIsLocked = isSelf || isLastAdmin || !isAdmin;
   const canEdit      = !isSelf;
 
   const toggleDept = (id) => {
@@ -135,15 +108,32 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
     setMemberDepts(prev => prev.includes(id) ? prev.filter(d => d !== id) : [...prev, id]);
   };
 
-  const handleSave = () => {
-    const updatedDepts = departments.filter(d => memberDepts.includes(d.id));
-    onUpdate({ ...member, role, department_ids: memberDepts, departments: updatedDepts });
-    onClose();
+  // ✅ Uses member.service instead of direct Supabase calls
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await updateMember(member, role, memberDepts);
+      const updatedDepts = departments.filter(d => memberDepts.includes(d.id));
+      onUpdate({ ...member, role, department_ids: memberDepts, departments: updatedDepts });
+      onClose();
+    } catch (err) {
+      console.warn('Save member error:', err.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const handleRemove = () => {
-    onRemove(member.user_id);
-    onClose();
+  const handleRemove = async () => {
+    setSaving(true);
+    try {
+      await removeMember(member.user_id, member.org_id, false);
+      onRemove(member.user_id);
+      onClose();
+    } catch (err) {
+      console.warn('Remove member error:', err.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -152,7 +142,6 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
         <Pressable style={styles.detailSheet} onPress={e => e.stopPropagation()}>
           <View style={styles.sheetHandle} />
           <View style={[styles.colorBar, { backgroundColor: member.avatar_color || colors.brand }]} />
-
           <ScrollView showsVerticalScrollIndicator={false}>
             <View style={styles.detailBody}>
               {/* Header */}
@@ -161,7 +150,7 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
                   <Avatar initials={member.initials} size={48} color={member.avatar_color} />
                   <View>
                     <Text style={styles.detailName}>{member.full_name}</Text>
-                    {member.email && <Text style={styles.detailEmail}>{member.email}</Text>}
+                    {member.email ? <Text style={styles.detailEmail}>{member.email}</Text> : null}
                     <Text style={styles.detailJoined}>
                       Joined {member.joined_at ? new Date(member.joined_at).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '—'}
                     </Text>
@@ -171,15 +160,6 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
                   <Text style={styles.closeBtnText}>✕</Text>
                 </TouchableOpacity>
               </View>
-
-              {/* On leave notice */}
-              {member.status === 'leave' && (
-                <View style={styles.leaveNotice}>
-                  <Text style={styles.leaveNoticeText}>
-                    {member.full_name.split(' ')[0]} is currently on leave
-                  </Text>
-                </View>
-              )}
 
               {/* Role */}
               <Text style={styles.sectionLabel}>ROLE</Text>
@@ -197,15 +177,8 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
                   </TouchableOpacity>
                 ))}
               </View>
-              {isSelf && !isLastAdmin && (
-                <Text style={styles.roleHint}>You can't change your own role.</Text>
-              )}
-              {isLastAdmin && (
-                <Text style={styles.roleHint}>Can't demote the only admin. Promote someone else first.</Text>
-              )}
-              {role === 'admin' && !roleIsLocked && (
-                <Text style={styles.roleHint}>Admins can pin posts, manage departments, and change member roles.</Text>
-              )}
+              {isSelf && <Text style={styles.roleHint}>You can't change your own role.</Text>}
+              {isLastAdmin && <Text style={styles.roleHint}>Can't demote the only admin.</Text>}
 
               {/* Departments */}
               <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>DEPARTMENTS</Text>
@@ -213,7 +186,7 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
                 {departments.map(dept => {
                   const isIn      = memberDepts.includes(dept.id);
                   const isGeneral = dept.name.toLowerCase() === 'general';
-                  const isLocked  = isGeneral && memberDepts.length === 1 && memberDepts.includes(dept.id);
+                  const isLocked  = isGeneral && memberDepts.length === 1 && isIn;
                   return (
                     <TouchableOpacity
                       key={dept.id}
@@ -222,12 +195,8 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
                       activeOpacity={canEdit && !isLocked ? 0.8 : 1}
                     >
                       <Text style={styles.deptRowName}>{dept.name}</Text>
-                      {isLocked && (
-                        <View style={styles.defaultChip}>
-                          <Text style={styles.defaultChipText}>default</Text>
-                        </View>
-                      )}
-                      <View style={[styles.deptCheck, isIn && { backgroundColor: colors.brand, borderColor: colors.brand }, isLocked && { opacity: 0.5 }]}>
+                      {isLocked && <View style={styles.defaultChip}><Text style={styles.defaultChipText}>default</Text></View>}
+                      <View style={[styles.deptCheck, isIn && { backgroundColor: colors.brand, borderColor: colors.brand }]}>
                         {isIn && <Text style={styles.deptCheckMark}>✓</Text>}
                       </View>
                     </TouchableOpacity>
@@ -238,18 +207,14 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
               {/* Remove confirm */}
               {confirmRemove && (
                 <View style={styles.removeConfirmBox}>
-                  <Text style={styles.removeConfirmTitle}>
-                    Remove {member.full_name.split(' ')[0]}?
-                  </Text>
-                  <Text style={styles.removeConfirmSub}>
-                    They'll lose access immediately. An admin can re-invite them.
-                  </Text>
+                  <Text style={styles.removeConfirmTitle}>Remove {member.full_name.split(' ')[0]}?</Text>
+                  <Text style={styles.removeConfirmSub}>They'll lose access immediately. An admin can re-invite them.</Text>
                   <View style={styles.removeConfirmBtns}>
                     <TouchableOpacity style={styles.cancelBtn} onPress={() => setConfirmRemove(false)} activeOpacity={0.8}>
                       <Text style={styles.cancelBtnText}>Cancel</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.removeBtn} onPress={handleRemove} activeOpacity={0.85}>
-                      <Text style={styles.removeBtnText}>Remove</Text>
+                    <TouchableOpacity style={[styles.removeBtn, saving && { opacity: 0.6 }]} onPress={handleRemove} disabled={saving} activeOpacity={0.85}>
+                      <Text style={styles.removeBtnText}>{saving ? '...' : 'Remove'}</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -263,8 +228,8 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
                       <Text style={styles.cancelBtnText}>Cancel</Text>
                     </TouchableOpacity>
                     {canEdit && (
-                      <TouchableOpacity style={styles.saveBtn} onPress={handleSave} activeOpacity={0.85}>
-                        <Text style={styles.saveBtnText}>Save changes</Text>
+                      <TouchableOpacity style={[styles.saveBtn, saving && { opacity: 0.6 }]} onPress={handleSave} disabled={saving} activeOpacity={0.85}>
+                        <Text style={styles.saveBtnText}>{saving ? '...' : 'Save changes'}</Text>
                       </TouchableOpacity>
                     )}
                   </View>
@@ -275,7 +240,6 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
                   )}
                 </>
               )}
-
               <View style={{ height: 32 }} />
             </View>
           </ScrollView>
@@ -285,31 +249,26 @@ function MemberDetailSheet({ member, departments, adminCount, onClose, onUpdate,
   );
 }
 
-// ── INVITE MODAL ──────────────────────────────────────────────────────────────
+// ── Invite modal ──────────────────────────────────────────────────────────────
 
-function InviteModal({ visible, onClose, orgName }) {
+function InviteModal({ visible, onClose, orgName, orgSlug, orgToken }) {
   const [copied,    setCopied]    = useState(false);
   const [email,     setEmail]     = useState('');
   const [emailSent, setEmailSent] = useState(false);
   const [error,     setError]     = useState('');
 
-  const inviteLink = 'https://app.notifiqe.com/join/acme-corp/abc123';
+  // ✅ Uses org.service buildInviteLink
+  const inviteLink = buildInviteLink(orgSlug, orgToken);
 
-  const handleCopy = () => {
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy  = () => { setCopied(true); setTimeout(() => setCopied(false), 2000); };
+  const handleShare = async () => {
+    try { await Share.share({ message: `Join ${orgName} on Notifiqe: ${inviteLink}`, url: inviteLink }); } catch (e) {}
   };
-
-  const handleSend = () => {
+  const handleSend  = () => {
     if (!email || !email.includes('@')) { setError('Enter a valid email address.'); return; }
-    setEmailSent(true);
-    setError('');
+    setEmailSent(true); setError('');
   };
-
-  const handleClose = () => {
-    setEmail(''); setEmailSent(false); setError(''); setCopied(false);
-    onClose();
-  };
+  const handleClose = () => { setEmail(''); setEmailSent(false); setError(''); setCopied(false); onClose(); };
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
@@ -318,67 +277,40 @@ function InviteModal({ visible, onClose, orgName }) {
           <Pressable style={styles.inviteSheet} onPress={e => e.stopPropagation()}>
             <View style={styles.sheetHandle} />
             <View style={[styles.colorBar, { backgroundColor: colors.brand }]} />
-
             <View style={styles.inviteHeader}>
               <Text style={styles.inviteTitle}>Invite to {orgName}</Text>
               <TouchableOpacity onPress={handleClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                 <Text style={styles.closeBtnText}>✕</Text>
               </TouchableOpacity>
             </View>
-
             <View style={styles.inviteBody}>
-              {/* Email invite */}
               <Text style={styles.sectionLabel}>INVITE BY EMAIL</Text>
               {emailSent ? (
-                <View style={styles.sentConfirm}>
-                  <Text style={styles.sentConfirmText}>✓  Invite sent to {email}</Text>
-                </View>
+                <View style={styles.sentConfirm}><Text style={styles.sentConfirmText}>✓  Invite sent to {email}</Text></View>
               ) : (
                 <>
                   <View style={styles.emailRow}>
-                    <TextInput
-                      style={[styles.emailInput, error && { borderColor: '#FECACA' }]}
-                      placeholder="colleague@company.com"
-                      placeholderTextColor={colors.placeholder}
-                      value={email}
-                      onChangeText={v => { setEmail(v); setError(''); }}
-                      keyboardType="email-address"
-                      autoCapitalize="none"
-                    />
-                    <TouchableOpacity style={styles.sendBtn} onPress={handleSend} activeOpacity={0.85}>
-                      <Text style={styles.sendBtnText}>Send</Text>
-                    </TouchableOpacity>
+                    <TextInput style={[styles.emailInput, error && { borderColor: '#FECACA' }]} placeholder="colleague@company.com" placeholderTextColor={colors.placeholder} value={email} onChangeText={v => { setEmail(v); setError(''); }} keyboardType="email-address" autoCapitalize="none" />
+                    <TouchableOpacity style={styles.sendBtn} onPress={handleSend} activeOpacity={0.85}><Text style={styles.sendBtnText}>Send</Text></TouchableOpacity>
                   </View>
                   {error ? <Text style={styles.errorText}>{error}</Text> : null}
                 </>
               )}
-
-              {/* Divider */}
               <View style={styles.divider}>
                 <View style={styles.dividerLine} />
                 <Text style={styles.dividerText}>or share link</Text>
                 <View style={styles.dividerLine} />
               </View>
-
-              {/* Invite link */}
               <View style={styles.linkRow}>
-                <View style={styles.linkBox}>
-                  <Text style={styles.linkText} numberOfLines={1}>{inviteLink}</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.copyBtn, copied && styles.copyBtnDone]}
-                  onPress={handleCopy}
-                  activeOpacity={0.85}
-                >
-                  <Text style={[styles.copyBtnText, copied && styles.copyBtnTextDone]}>
-                    {copied ? '✓ Copied' : 'Copy'}
-                  </Text>
+                <View style={styles.linkBox}><Text style={styles.linkText} numberOfLines={1}>{inviteLink}</Text></View>
+                <TouchableOpacity style={[styles.copyBtn, copied && styles.copyBtnDone]} onPress={handleCopy} activeOpacity={0.85}>
+                  <Text style={[styles.copyBtnText, copied && styles.copyBtnTextDone]}>{copied ? '✓ Copied' : 'Copy'}</Text>
                 </TouchableOpacity>
               </View>
-
-              <Text style={styles.inviteNote}>
-                New members need admin approval before they can access the workspace
-              </Text>
+              <TouchableOpacity style={styles.shareBtn} onPress={handleShare} activeOpacity={0.85}>
+                <Text style={styles.shareBtnText}>Share invite link</Text>
+              </TouchableOpacity>
+              <Text style={styles.inviteNote}>New members need admin approval before they can access the workspace</Text>
             </View>
           </Pressable>
         </KeyboardAvoidingView>
@@ -387,51 +319,170 @@ function InviteModal({ visible, onClose, orgName }) {
   );
 }
 
-// ── MAIN SCREEN ───────────────────────────────────────────────────────────────
+// ── Main screen ───────────────────────────────────────────────────────────────
 
 export default function MembersScreen() {
-  const [members,        setMembers]        = useState(MOCK_MEMBERS);
-  const [pending,        setPending]        = useState(MOCK_PENDING);
-  const [departments,    setDepartments]    = useState(MOCK_DEPARTMENTS);
+  // ✅ Org data from AppContext — no extra Supabase call needed
+  const { user, org, orgId, orgName, isAdmin } = useApp();
+
+  const [loading,        setLoading]        = useState(true);
+  const [members,        setMembers]        = useState([]);
+  const [pending,        setPending]        = useState([]);
+  const [departments,    setDepartments]    = useState([]);
   const [filterDept,     setFilterDept]     = useState('all');
   const [search,         setSearch]         = useState('');
   const [selectedMember, setSelectedMember] = useState(null);
   const [showInvite,     setShowInvite]     = useState(false);
   const [addingDept,     setAddingDept]     = useState(false);
   const [newDeptName,    setNewDeptName]    = useState('');
+  const [editingDept,    setEditingDept]    = useState(null);
+  const [editDeptName,   setEditDeptName]   = useState('');
+  const [deletingDept,   setDeletingDept]   = useState(null);
 
-  const isAdmin    = CURRENT_USER.role === 'admin';
   const adminCount = members.filter(m => m.role === 'admin').length;
-  const orgName    = 'Acme Corp';
 
-  // Filter members
+  // ── Load data using services ──────────────────────────────────────────────
+
+  const loadData = useCallback(async () => {
+    if (!orgId) return;
+    try {
+      const [freshMembers, freshPending, freshDepts] = await Promise.all([
+        getMembers(orgId),
+        getPendingRequests(orgId),
+        getDepartments(orgId),
+      ]);
+      setMembers(freshMembers);
+      setPending(freshPending);
+      setDepartments(freshDepts);
+    } catch (err) {
+      console.warn('MembersScreen loadData error:', err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [orgId]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  // ── Realtime subscriptions ────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!orgId) return;
+    const channel = supabase
+      .channel(`members-${orgId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'memberships',     filter: `org_id=eq.${orgId}` }, loadData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'join_requests',   filter: `org_id=eq.${orgId}` }, loadData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'departments',     filter: `org_id=eq.${orgId}` }, loadData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' },                                      loadData)
+      .subscribe();
+    return () => supabase.removeChannel(channel);
+  }, [orgId, loadData]);
+
+  // ── Filter + search ───────────────────────────────────────────────────────
+
   const visible = members
     .filter(m => filterDept === 'all' || m.department_ids.includes(filterDept))
-    .filter(m =>
-      m.full_name.toLowerCase().includes(search.toLowerCase()) ||
-      m.email.toLowerCase().includes(search.toLowerCase())
-    );
+    .filter(m => m.full_name.toLowerCase().includes(search.toLowerCase()) || m.email.toLowerCase().includes(search.toLowerCase()));
 
   const admins  = visible.filter(m => m.role === 'admin');
   const regular = visible.filter(m => m.role === 'member');
 
-  const handleApprove = (id) => setPending(p => p.filter(m => m.membership_id !== id));
-  const handleDecline = (id) => setPending(p => p.filter(m => m.membership_id !== id));
+  // ── Approve / Decline ─────────────────────────────────────────────────────
 
-  const handleUpdate = (updated) =>
-    setMembers(prev => prev.map(m => m.user_id === updated.user_id ? updated : m));
+  const handleApprove = async (id) => {
+    setPending(p => p.map(m => m.membership_id === id ? { ...m, approving: true } : m));
+    try {
+      await approveRequest(id);
+    } catch (err) {
+      console.warn('Approve error:', err.message);
+      setPending(p => p.map(m => m.membership_id === id ? { ...m, approving: false } : m));
+    }
+    await loadData();
+  };
 
-  const handleRemove = (userId) =>
-    setMembers(prev => prev.filter(m => m.user_id !== userId));
+  const handleDecline = async (id) => {
+    setPending(p => p.filter(m => m.membership_id !== id));
+    try {
+      await declineRequest(id);
+    } catch (err) {
+      console.warn('Decline error:', err.message);
+      await loadData();
+    }
+  };
 
-  const handleAddDept = () => {
+  // ── Member update / remove ────────────────────────────────────────────────
+
+  const handleUpdate = (updated) => setMembers(prev => prev.map(m => m.user_id === updated.user_id ? updated : m));
+  const handleRemove = (userId) => setMembers(prev => prev.filter(m => m.user_id !== userId));
+
+  // ── Department management ─────────────────────────────────────────────────
+
+  const handleAddDept = async () => {
     const name = newDeptName.trim();
-    if (!name) return;
-    const newDept = { id: `d${Date.now()}`, name };
-    setDepartments(prev => [...prev, newDept].sort((a, b) => a.name.localeCompare(b.name)));
+    if (!name || !orgId) return;
+    try {
+      const data = await addDepartment(orgId, name);
+      setDepartments(prev => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
+    } catch (err) { console.warn('Add dept error:', err.message); }
     setNewDeptName('');
     setAddingDept(false);
   };
+
+  const handleEditDept = async () => {
+    const name = editDeptName.trim();
+    if (!name || !editingDept) return;
+    try {
+      await renameDepartment(editingDept.id, name);
+      setDepartments(prev => prev.map(d => d.id === editingDept.id ? { ...d, name } : d).sort((a, b) => a.name.localeCompare(b.name)));
+    } catch (err) { console.warn('Rename dept error:', err.message); }
+    setEditingDept(null);
+    setEditDeptName('');
+  };
+
+  const handleDeleteDept = async (deptId) => {
+    setDeletingDept(deptId);
+    try {
+      await deleteDepartment(deptId);
+      setDepartments(prev => prev.filter(d => d.id !== deptId));
+      setMembers(prev => prev.map(m => ({
+        ...m,
+        departments:    m.departments.filter(d => d.id !== deptId),
+        department_ids: m.department_ids.filter(id => id !== deptId),
+      })));
+      if (filterDept === deptId) setFilterDept('all');
+    } catch (err) { console.warn('Delete dept error:', err.message); }
+    setDeletingDept(null);
+  };
+
+  // ── Loading skeleton ──────────────────────────────────────────────────────
+
+  if (loading) return (
+    <View style={[styles.root, { backgroundColor: '#F3F4F6' }]}>
+      {Platform.OS === 'ios' ? (
+        <SafeAreaView style={{ backgroundColor: colors.white }}>
+          <View style={styles.appHeader}>
+            <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
+          </View>
+        </SafeAreaView>
+      ) : (
+        <View style={styles.headerBlock}>
+          <View style={styles.appHeader}>
+            <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
+          </View>
+        </View>
+      )}
+      <View style={{ padding: spacing.page, gap: spacing.md }}>
+        {[1,2,3].map(i => (
+          <View key={i} style={[styles.memberRow, { opacity: 0.4 }]}>
+            <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: colors.borderLight }} />
+            <View style={{ flex: 1, gap: 6 }}>
+              <View style={{ width: '60%', height: 12, borderRadius: 6, backgroundColor: colors.borderLight }} />
+              <View style={{ width: '40%', height: 10, borderRadius: 5, backgroundColor: colors.borderLight }} />
+            </View>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
 
   return (
     <View style={styles.root}>
@@ -456,12 +507,8 @@ export default function MembersScreen() {
         </View>
       )}
 
-      <ScrollView
-        style={styles.scroll}
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-      >
+      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+
         {/* Page header */}
         <View style={styles.pageHeader}>
           <View>
@@ -475,7 +522,7 @@ export default function MembersScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Pending section */}
+        {/* Pending */}
         {pending.length > 0 && (
           <View style={styles.pendingSection}>
             <View style={styles.pendingSectionHeader}>
@@ -484,12 +531,7 @@ export default function MembersScreen() {
             </View>
             <View style={styles.pendingList}>
               {pending.map(m => (
-                <PendingRow
-                  key={m.membership_id}
-                  member={m}
-                  onApprove={handleApprove}
-                  onDecline={handleDecline}
-                />
+                <PendingRow key={m.membership_id} member={m} onApprove={handleApprove} onDecline={handleDecline} />
               ))}
             </View>
           </View>
@@ -498,13 +540,7 @@ export default function MembersScreen() {
         {/* Search */}
         <View style={styles.searchWrap}>
           <Text style={styles.searchIcon}>⌕</Text>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search members..."
-            placeholderTextColor={colors.placeholder}
-            value={search}
-            onChangeText={setSearch}
-          />
+          <TextInput style={styles.searchInput} placeholder="Search members..." placeholderTextColor={colors.placeholder} value={search} onChangeText={setSearch} />
           {search.length > 0 && (
             <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.searchClear}>✕</Text>
@@ -512,43 +548,44 @@ export default function MembersScreen() {
           )}
         </View>
 
-        {/* Department filter pills */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.deptFilterScroll}
-          contentContainerStyle={styles.deptFilterContent}
-        >
-          <TouchableOpacity
-            style={[styles.filterPill, filterDept === 'all' && styles.filterPillAllActive]}
-            onPress={() => setFilterDept('all')}
-            activeOpacity={0.8}
-          >
-            <Text style={[styles.filterPillText, filterDept === 'all' && styles.filterPillTextAllActive]}>
-              All
-            </Text>
+        {/* Dept filter pills */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.deptFilterScroll} contentContainerStyle={styles.deptFilterContent}>
+          <TouchableOpacity style={[styles.filterPill, filterDept === 'all' && styles.filterPillAllActive]} onPress={() => setFilterDept('all')} activeOpacity={0.8}>
+            <Text style={[styles.filterPillText, filterDept === 'all' && styles.filterPillTextAllActive]}>All</Text>
           </TouchableOpacity>
 
-          {departments.map(d => (
-            <TouchableOpacity
-              key={d.id}
-              style={[styles.filterPill, filterDept === d.id && styles.filterPillActive]}
-              onPress={() => setFilterDept(d.id)}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.filterPillText, filterDept === d.id && styles.filterPillTextActive]}>
-                {d.name}
-              </Text>
-            </TouchableOpacity>
-          ))}
+          {departments.map(d => {
+            const isGeneral = d.name.toLowerCase() === 'general';
+            if (editingDept?.id === d.id) return (
+              <View key={d.id} style={styles.editDeptRow}>
+                <TextInput style={styles.editDeptInput} value={editDeptName} onChangeText={setEditDeptName} onSubmitEditing={handleEditDept} autoFocus returnKeyType="done" />
+                <TouchableOpacity style={styles.editDeptSave} onPress={handleEditDept} activeOpacity={0.85}><Text style={styles.editDeptSaveText}>Save</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.editDeptCancel} onPress={() => setEditingDept(null)} activeOpacity={0.8}><Text style={styles.editDeptCancelText}>✕</Text></TouchableOpacity>
+              </View>
+            );
+            return (
+              <TouchableOpacity
+                key={d.id}
+                style={[styles.filterPill, filterDept === d.id && styles.filterPillActive]}
+                onPress={() => setFilterDept(d.id)}
+                onLongPress={() => {
+                  if (!isAdmin) return;
+                  Alert.alert(d.name, 'What would you like to do?', [
+                    { text: 'Rename', onPress: () => { setEditingDept(d); setEditDeptName(d.name); } },
+                    ...(!isGeneral ? [{ text: 'Delete', style: 'destructive', onPress: () => setDeletingDept(d.id) }] : []),
+                    { text: 'Cancel', style: 'cancel' },
+                  ]);
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.filterPillText, filterDept === d.id && styles.filterPillTextActive]}>{d.name}</Text>
+              </TouchableOpacity>
+            );
+          })}
 
           {isAdmin && !addingDept && (
-            <TouchableOpacity
-              style={styles.filterPillDashed}
-              onPress={() => setAddingDept(true)}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.filterPillDashedText}>+ New</Text>
+            <TouchableOpacity style={styles.filterPillDashed} onPress={() => setAddingDept(true)} activeOpacity={0.8}>
+              <Text style={styles.filterPillDashedText}>+ New dept</Text>
             </TouchableOpacity>
           )}
         </ScrollView>
@@ -556,22 +593,9 @@ export default function MembersScreen() {
         {/* Inline add dept */}
         {addingDept && (
           <View style={styles.addDeptRow}>
-            <TextInput
-              style={styles.addDeptInput}
-              placeholder="Department name..."
-              placeholderTextColor={colors.placeholder}
-              value={newDeptName}
-              onChangeText={setNewDeptName}
-              autoFocus
-              onSubmitEditing={handleAddDept}
-              returnKeyType="done"
-            />
-            <TouchableOpacity style={styles.addDeptSave} onPress={handleAddDept} activeOpacity={0.85}>
-              <Text style={styles.addDeptSaveText}>Add</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.addDeptCancel} onPress={() => { setAddingDept(false); setNewDeptName(''); }} activeOpacity={0.8}>
-              <Text style={styles.addDeptCancelText}>✕</Text>
-            </TouchableOpacity>
+            <TextInput style={styles.addDeptInput} placeholder="Department name..." placeholderTextColor={colors.placeholder} value={newDeptName} onChangeText={setNewDeptName} autoFocus onSubmitEditing={handleAddDept} returnKeyType="done" />
+            <TouchableOpacity style={styles.addDeptSave} onPress={handleAddDept} activeOpacity={0.85}><Text style={styles.addDeptSaveText}>Add</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.addDeptCancel} onPress={() => { setAddingDept(false); setNewDeptName(''); }} activeOpacity={0.8}><Text style={styles.addDeptCancelText}>✕</Text></TouchableOpacity>
           </View>
         )}
 
@@ -580,9 +604,7 @@ export default function MembersScreen() {
           <View style={styles.memberSection}>
             <Text style={styles.sectionHeader}>ADMINS · {admins.length}</Text>
             <View style={styles.memberList}>
-              {admins.map(m => (
-                <MemberRow key={m.user_id} member={m} onPress={() => setSelectedMember(m)} />
-              ))}
+              {admins.map(m => <MemberRow key={m.user_id} member={m} onPress={() => setSelectedMember(m)} />)}
             </View>
           </View>
         )}
@@ -592,18 +614,14 @@ export default function MembersScreen() {
           <View style={styles.memberSection}>
             <Text style={styles.sectionHeader}>MEMBERS · {regular.length}</Text>
             <View style={styles.memberList}>
-              {regular.map(m => (
-                <MemberRow key={m.user_id} member={m} onPress={() => setSelectedMember(m)} />
-              ))}
+              {regular.map(m => <MemberRow key={m.user_id} member={m} onPress={() => setSelectedMember(m)} />)}
             </View>
           </View>
         )}
 
         {visible.length === 0 && members.length === 0 && (
           <View style={styles.emptyWrap}>
-            <View style={styles.emptyIcon}>
-              <Text style={styles.emptyIconText}>⊕</Text>
-            </View>
+            <View style={styles.emptyIcon}><Text style={styles.emptyIconText}>⊕</Text></View>
             <Text style={styles.emptyTitle}>No members yet</Text>
             <Text style={styles.emptySub}>Invite your team to get started.</Text>
             <TouchableOpacity style={styles.emptyInviteBtn} onPress={() => setShowInvite(true)} activeOpacity={0.85}>
@@ -628,10 +646,28 @@ export default function MembersScreen() {
           member={selectedMember}
           departments={departments}
           adminCount={adminCount}
+          currentUserId={user?.id}
+          isAdmin={isAdmin}
           onClose={() => setSelectedMember(null)}
           onUpdate={handleUpdate}
           onRemove={handleRemove}
         />
+      )}
+
+      {/* Delete dept confirm */}
+      {deletingDept && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setDeletingDept(null)}>
+          <Pressable style={styles.overlay} onPress={() => setDeletingDept(null)}>
+            <Pressable style={styles.confirmBox} onPress={e => e.stopPropagation()}>
+              <Text style={styles.confirmTitle}>Delete department?</Text>
+              <Text style={styles.confirmBody}>All members will be removed from this department. This can't be undone.</Text>
+              <View style={styles.confirmBtns}>
+                <TouchableOpacity style={styles.cancelBtn} onPress={() => setDeletingDept(null)} activeOpacity={0.8}><Text style={styles.cancelBtnText}>Cancel</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.removeBtn} onPress={() => handleDeleteDept(deletingDept)} activeOpacity={0.85}><Text style={styles.removeBtnText}>Delete</Text></TouchableOpacity>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
       )}
 
       {/* Invite modal */}
@@ -639,172 +675,164 @@ export default function MembersScreen() {
         visible={showInvite}
         onClose={() => setShowInvite(false)}
         orgName={orgName}
+        orgSlug={org?.slug}
+        orgToken={org?.invite_token}
       />
     </View>
   );
 }
 
-// ── STYLES ────────────────────────────────────────────────────────────────────
+// ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#F3F4F6' },
-
-  headerBlock: { backgroundColor: colors.white, paddingTop: StatusBar.currentHeight, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  appHeader: { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.page, gap: spacing.sm, backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  appLogo: { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
-  appLogoAccent: { color: colors.brand },
-  appSep: { fontSize: 14, color: colors.border },
-  appOrg: { flex: 1, fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
-
-  scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: spacing.page, paddingTop: spacing.md },
-
-  // Page header
-  pageHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.lg },
-  pageTitle: { fontSize: 20, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black, marginBottom: 2 },
-  pageSub: { fontSize: 13, color: colors.subtle },
-  inviteBtn: { backgroundColor: colors.brand, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 8 },
-  inviteBtnText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
-
-  // Pending
-  pendingSection: { marginBottom: spacing.lg },
-  pendingSectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: spacing.sm },
-  pendingDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#D97706' },
-  pendingSectionLabel: { fontSize: 11, fontWeight: typography.bold, color: '#D97706', textTransform: 'uppercase', letterSpacing: 0.8 },
-  pendingList: { gap: spacing.sm },
-  pendingRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md, backgroundColor: colors.white, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.borderLight },
-  pendingInfo: { flex: 1, minWidth: 0 },
-  pendingName: { fontSize: 14, fontWeight: typography.bold, color: colors.black },
-  pendingEmail: { fontSize: 12, color: colors.subtle, marginTop: 1 },
-  pendingActions: { flexDirection: 'row', gap: 8, flexShrink: 0 },
-  declineBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: colors.border },
-  declineBtnText: { fontSize: 12, fontWeight: typography.semibold, color: colors.muted },
-  approveBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.brand },
-  approveBtnText: { fontSize: 12, fontWeight: typography.semibold, color: colors.white },
-
-  // Search
-  searchWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, paddingHorizontal: spacing.md, marginBottom: spacing.sm, minHeight: 44 },
-  searchIcon: { fontSize: 16, color: colors.placeholder, marginRight: spacing.sm },
-  searchInput: { flex: 1, fontSize: 14, color: colors.black },
-  searchClear: { fontSize: 14, color: colors.placeholder, padding: 4 },
-
-  // Dept filter
-  deptFilterScroll: { marginBottom: spacing.sm },
-  deptFilterContent: { gap: 6, paddingRight: spacing.page },
-  filterPill: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 100, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.white },
-  filterPillActive: { backgroundColor: '#EFF6FF', borderColor: colors.brand },
-  filterPillAllActive: { backgroundColor: colors.black, borderColor: colors.black },
-  filterPillText: { fontSize: 13, color: colors.muted, fontWeight: typography.medium },
-  filterPillTextActive: { color: colors.brand, fontWeight: typography.semibold },
-  filterPillTextAllActive: { color: colors.white, fontWeight: typography.semibold },
-  filterPillDashed: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 100, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.border, backgroundColor: colors.white },
-  filterPillDashedText: { fontSize: 13, color: colors.subtle, fontWeight: typography.medium },
-
-  // Add dept inline
-  addDeptRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
-  addDeptInput: { flex: 1, borderWidth: 1, borderColor: colors.brand, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 8, fontSize: 14, color: colors.black },
-  addDeptSave: { backgroundColor: colors.brand, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 8, justifyContent: 'center' },
-  addDeptSaveText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
-  addDeptCancel: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 8, justifyContent: 'center' },
-  addDeptCancelText: { fontSize: 13, color: colors.muted },
-
-  // Member sections
-  memberSection: { marginBottom: spacing.lg },
-  sectionHeader: { fontSize: 11, fontWeight: typography.bold, color: colors.subtle, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: spacing.sm },
-  memberList: { gap: spacing.sm },
-
-  // Member row
-  memberRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md, backgroundColor: colors.white, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.borderLight, minHeight: 72 },
-  memberAvatarWrap: { position: 'relative', flexShrink: 0 },
-  leaveRing: { position: 'absolute', top: -3, left: -3, right: -3, bottom: -3, borderRadius: 100, borderWidth: 2, borderColor: '#FDE68A', borderStyle: 'dashed' },
-  memberInfo: { flex: 1, minWidth: 0 },
-  memberNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' },
-  memberName: { fontSize: 15, fontWeight: typography.bold, color: colors.black },
-  adminBadge: { backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  adminBadgeText: { fontSize: 10, fontWeight: typography.bold, color: colors.brand },
-  leaveBadge: { backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  leaveBadgeText: { fontSize: 10, fontWeight: typography.bold, color: '#92400E' },
-  memberEmail: { fontSize: 12, color: colors.subtle, marginBottom: 5 },
-  memberDepts: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
-  deptChip: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: colors.borderLight, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  deptChipText: { fontSize: 11, color: colors.muted, fontWeight: typography.medium },
-  chevron: { fontSize: 20, color: colors.placeholder, fontWeight: '300' },
-
-  // Empty
-  emptyWrap: { alignItems: 'center', paddingVertical: 48 },
-  emptyTitle: { fontSize: 16, fontWeight: typography.bold, color: colors.black, marginBottom: 6 },
-  emptySub: { fontSize: 14, color: colors.subtle },
-
-  // Avatar
-  avatar: { borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  avatarText: { fontWeight: typography.bold },
-
-  // Shared sheet styles
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  sheetHandle: { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 4 },
-  colorBar: { height: 4, width: '100%' },
-
-  // Member detail sheet
-  detailSheet: { backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '92%' },
-  detailBody: { padding: spacing.page },
-  detailHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: spacing.lg },
-  detailHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, flex: 1 },
-  detailName: { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.3, color: colors.black, marginBottom: 2 },
-  detailEmail: { fontSize: 13, color: colors.subtle, marginBottom: 2 },
-  detailJoined: { fontSize: 12, color: colors.subtle },
-  closeBtn: { padding: 4 },
-  closeBtnText: { fontSize: 16, color: colors.subtle },
-  leaveNotice: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.lg },
-  leaveNoticeText: { fontSize: 13, color: colors.muted },
-  sectionLabel: { fontSize: 11, fontWeight: typography.bold, color: colors.subtle, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 },
-  roleRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: 6 },
-  roleBtn: { flex: 1, paddingVertical: 10, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, alignItems: 'center' },
-  roleBtnActive: { borderColor: colors.brand, backgroundColor: '#EFF6FF' },
-  roleBtnText: { fontSize: 14, fontWeight: typography.semibold, color: colors.muted },
-  roleBtnTextActive: { color: colors.brand },
-  roleHint: { fontSize: 12, color: colors.subtle, marginBottom: spacing.sm, lineHeight: 17 },
-  deptList: { gap: spacing.sm, marginBottom: spacing.lg },
-  deptRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.borderLight, backgroundColor: '#F9FAFB', minHeight: 48 },
-  deptRowName: { flex: 1, fontSize: 14, fontWeight: typography.medium, color: '#374151' },
-  defaultChip: { backgroundColor: '#F3F4F6', borderWidth: 1, borderColor: colors.border, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  defaultChipText: { fontSize: 10, color: colors.subtle, fontWeight: typography.medium },
-  deptCheck: { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.white },
-  deptCheckMark: { fontSize: 10, color: colors.white, fontWeight: typography.bold },
-  actionRow: { flexDirection: 'row', gap: spacing.sm },
-  cancelBtn: { flex: 1, paddingVertical: 12, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, alignItems: 'center' },
-  cancelBtnText: { fontSize: 14, fontWeight: typography.semibold, color: colors.muted },
-  saveBtn: { flex: 2, paddingVertical: 12, borderRadius: radius.lg, backgroundColor: colors.brand, alignItems: 'center' },
-  saveBtnText: { fontSize: 14, fontWeight: typography.semibold, color: colors.white },
-  removeLink: { alignItems: 'center', paddingVertical: spacing.md },
-  removeLinkText: { fontSize: 13, color: '#EF4444', fontWeight: typography.medium },
-  removeConfirmBox: { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.md },
-  removeConfirmTitle: { fontSize: 14, fontWeight: typography.bold, color: '#DC2626', marginBottom: 4 },
-  removeConfirmSub: { fontSize: 13, color: colors.muted, lineHeight: 18, marginBottom: spacing.md },
-  removeConfirmBtns: { flexDirection: 'row', gap: spacing.sm },
-  removeBtn: { flex: 1, paddingVertical: 10, borderRadius: radius.md, backgroundColor: '#DC2626', alignItems: 'center' },
-  removeBtnText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
-
-  // Invite sheet
-  inviteSheet: { backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 36 },
-  inviteHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.page, paddingVertical: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  inviteTitle: { fontSize: 16, fontWeight: typography.bold, color: colors.black },
-  inviteBody: { padding: spacing.page },
-  emailRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
-  emailInput: { flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 10, fontSize: 14, color: colors.black },
-  sendBtn: { backgroundColor: colors.brand, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 10, justifyContent: 'center' },
-  sendBtnText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
-  sentConfirm: { backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#BBF7D0', borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.md },
-  sentConfirmText: { fontSize: 14, color: '#065F46', fontWeight: typography.semibold },
-  errorText: { fontSize: 12, color: '#DC2626', marginBottom: spacing.sm },
-  divider: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginVertical: spacing.md },
-  dividerLine: { flex: 1, height: 1, backgroundColor: colors.borderLight },
-  dividerText: { fontSize: 12, color: colors.placeholder, fontWeight: typography.medium },
-  linkRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
-  linkBox: { flex: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, justifyContent: 'center' },
-  linkText: { fontSize: 12, color: colors.muted },
-  copyBtn: { backgroundColor: colors.brand, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, justifyContent: 'center', minWidth: 80, alignItems: 'center' },
-  copyBtnDone: { backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#BBF7D0' },
-  copyBtnText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
-  copyBtnTextDone: { color: '#065F46' },
-  inviteNote: { fontSize: 12, color: colors.subtle, textAlign: 'center', lineHeight: 17 },
+  root:                   { flex: 1, backgroundColor: '#F3F4F6' },
+  headerBlock:            { backgroundColor: colors.white, paddingTop: StatusBar.currentHeight, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  appHeader:              { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.page, gap: spacing.sm, backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  appLogo:                { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
+  appLogoAccent:          { color: colors.brand },
+  appSep:                 { fontSize: 14, color: colors.border },
+  appOrg:                 { flex: 1, fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
+  scroll:                 { flex: 1 },
+  scrollContent:          { paddingHorizontal: spacing.page, paddingTop: spacing.md },
+  pageHeader:             { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.lg },
+  pageTitle:              { fontSize: 20, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black, marginBottom: 2 },
+  pageSub:                { fontSize: 13, color: colors.subtle },
+  inviteBtn:              { backgroundColor: colors.brand, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 8 },
+  inviteBtnText:          { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  pendingSection:         { marginBottom: spacing.lg },
+  pendingSectionHeader:   { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: spacing.sm },
+  pendingDot:             { width: 7, height: 7, borderRadius: 4, backgroundColor: '#D97706' },
+  pendingSectionLabel:    { fontSize: 11, fontWeight: typography.bold, color: '#D97706', textTransform: 'uppercase', letterSpacing: 0.8 },
+  pendingList:            { gap: spacing.sm },
+  pendingRow:             { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md, backgroundColor: colors.white, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.borderLight },
+  pendingInfo:            { flex: 1, minWidth: 0 },
+  pendingName:            { fontSize: 14, fontWeight: typography.bold, color: colors.black },
+  pendingEmail:           { fontSize: 12, color: colors.subtle, marginTop: 1 },
+  pendingActions:         { flexDirection: 'row', gap: 8, flexShrink: 0 },
+  declineBtn:             { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: colors.border },
+  declineBtnText:         { fontSize: 12, fontWeight: typography.semibold, color: colors.muted },
+  approveBtn:             { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.brand },
+  approveBtnText:         { fontSize: 12, fontWeight: typography.semibold, color: colors.white },
+  searchWrap:             { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, paddingHorizontal: spacing.md, marginBottom: spacing.sm, minHeight: 44 },
+  searchIcon:             { fontSize: 16, color: colors.placeholder, marginRight: spacing.sm },
+  searchInput:            { flex: 1, fontSize: 14, color: colors.black },
+  searchClear:            { fontSize: 14, color: colors.placeholder, padding: 4 },
+  deptFilterScroll:       { marginBottom: spacing.sm },
+  deptFilterContent:      { gap: 6, paddingRight: spacing.page },
+  filterPill:             { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 100, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.white },
+  filterPillActive:       { backgroundColor: '#EFF6FF', borderColor: colors.brand },
+  filterPillAllActive:    { backgroundColor: colors.black, borderColor: colors.black },
+  filterPillText:         { fontSize: 13, color: colors.muted, fontWeight: typography.medium },
+  filterPillTextActive:   { color: colors.brand, fontWeight: typography.semibold },
+  filterPillTextAllActive:{ color: colors.white, fontWeight: typography.semibold },
+  filterPillDashed:       { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 100, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.border, backgroundColor: colors.white },
+  filterPillDashedText:   { fontSize: 13, color: colors.subtle, fontWeight: typography.medium },
+  addDeptRow:             { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
+  addDeptInput:           { flex: 1, borderWidth: 1, borderColor: colors.brand, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 8, fontSize: 14, color: colors.black },
+  addDeptSave:            { backgroundColor: colors.brand, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 8, justifyContent: 'center' },
+  addDeptSaveText:        { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  addDeptCancel:          { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 8, justifyContent: 'center' },
+  addDeptCancelText:      { fontSize: 13, color: colors.muted },
+  memberSection:          { marginBottom: spacing.lg },
+  sectionHeader:          { fontSize: 11, fontWeight: typography.bold, color: colors.subtle, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: spacing.sm },
+  memberList:             { gap: spacing.sm },
+  memberRow:              { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md, backgroundColor: colors.white, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.borderLight, minHeight: 72 },
+  memberAvatarWrap:       { position: 'relative', flexShrink: 0 },
+  leaveRing:              { position: 'absolute', top: -3, left: -3, right: -3, bottom: -3, borderRadius: 100, borderWidth: 2, borderColor: '#FDE68A', borderStyle: 'dashed' },
+  memberInfo:             { flex: 1, minWidth: 0 },
+  memberNameRow:          { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' },
+  memberName:             { fontSize: 15, fontWeight: typography.bold, color: colors.black },
+  adminBadge:             { backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  adminBadgeText:         { fontSize: 10, fontWeight: typography.bold, color: colors.brand },
+  leaveBadge:             { backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  leaveBadgeText:         { fontSize: 10, fontWeight: typography.bold, color: '#92400E' },
+  invitedBadge:           { backgroundColor: '#F5F3FF', borderWidth: 1, borderColor: '#DDD6FE', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  invitedBadgeText:       { fontSize: 10, fontWeight: typography.bold, color: '#5B21B6' },
+  memberEmail:            { fontSize: 12, color: colors.subtle, marginBottom: 5 },
+  memberDepts:            { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  deptChip:               { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: colors.borderLight, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  deptChipText:           { fontSize: 11, color: colors.muted, fontWeight: typography.medium },
+  chevron:                { fontSize: 20, color: colors.placeholder, fontWeight: '300' },
+  emptyWrap:              { alignItems: 'center', paddingVertical: 48 },
+  emptyIcon:              { width: 56, height: 56, borderRadius: 16, backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE', alignItems: 'center', justifyContent: 'center', marginBottom: spacing.sm },
+  emptyIconText:          { fontSize: 24, color: colors.brand },
+  emptyTitle:             { fontSize: 16, fontWeight: typography.bold, color: colors.black, marginBottom: 6 },
+  emptySub:               { fontSize: 14, color: colors.subtle, marginBottom: 6 },
+  emptyInviteBtn:         { backgroundColor: colors.brand, borderRadius: radius.lg, paddingHorizontal: spacing.xl, paddingVertical: 12, marginTop: spacing.sm },
+  emptyInviteBtnText:     { fontSize: 14, fontWeight: typography.semibold, color: colors.white },
+  avatar:                 { borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  avatarText:             { fontWeight: typography.bold },
+  overlay:                { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  sheetHandle:            { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 4 },
+  colorBar:               { height: 4, width: '100%' },
+  detailSheet:            { backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '92%' },
+  detailBody:             { padding: spacing.page },
+  detailHeader:           { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: spacing.lg },
+  detailHeaderLeft:       { flexDirection: 'row', alignItems: 'center', gap: spacing.md, flex: 1 },
+  detailName:             { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.3, color: colors.black, marginBottom: 2 },
+  detailEmail:            { fontSize: 13, color: colors.subtle, marginBottom: 2 },
+  detailJoined:           { fontSize: 12, color: colors.subtle },
+  closeBtn:               { padding: 4 },
+  closeBtnText:           { fontSize: 16, color: colors.subtle },
+  sectionLabel:           { fontSize: 11, fontWeight: typography.bold, color: colors.subtle, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 },
+  roleRow:                { flexDirection: 'row', gap: spacing.sm, marginBottom: 6 },
+  roleBtn:                { flex: 1, paddingVertical: 10, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, alignItems: 'center' },
+  roleBtnActive:          { borderColor: colors.brand, backgroundColor: '#EFF6FF' },
+  roleBtnText:            { fontSize: 14, fontWeight: typography.semibold, color: colors.muted },
+  roleBtnTextActive:      { color: colors.brand },
+  roleHint:               { fontSize: 12, color: colors.subtle, marginBottom: spacing.sm, lineHeight: 17 },
+  deptList:               { gap: spacing.sm, marginBottom: spacing.lg },
+  deptRow:                { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.borderLight, backgroundColor: '#F9FAFB', minHeight: 48 },
+  deptRowName:            { flex: 1, fontSize: 14, fontWeight: typography.medium, color: '#374151' },
+  defaultChip:            { backgroundColor: '#F3F4F6', borderWidth: 1, borderColor: colors.border, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  defaultChipText:        { fontSize: 10, color: colors.subtle, fontWeight: typography.medium },
+  deptCheck:              { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.white },
+  deptCheckMark:          { fontSize: 10, color: colors.white, fontWeight: typography.bold },
+  actionRow:              { flexDirection: 'row', gap: spacing.sm },
+  cancelBtn:              { flex: 1, paddingVertical: 12, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, alignItems: 'center' },
+  cancelBtnText:          { fontSize: 14, fontWeight: typography.semibold, color: colors.muted },
+  saveBtn:                { flex: 2, paddingVertical: 12, borderRadius: radius.lg, backgroundColor: colors.brand, alignItems: 'center' },
+  saveBtnText:            { fontSize: 14, fontWeight: typography.semibold, color: colors.white },
+  removeLink:             { alignItems: 'center', paddingVertical: spacing.md },
+  removeLinkText:         { fontSize: 13, color: '#EF4444', fontWeight: typography.medium },
+  removeConfirmBox:       { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.md },
+  removeConfirmTitle:     { fontSize: 14, fontWeight: typography.bold, color: '#DC2626', marginBottom: 4 },
+  removeConfirmSub:       { fontSize: 13, color: colors.muted, lineHeight: 18, marginBottom: spacing.md },
+  removeConfirmBtns:      { flexDirection: 'row', gap: spacing.sm },
+  removeBtn:              { flex: 1, paddingVertical: 10, borderRadius: radius.md, backgroundColor: '#DC2626', alignItems: 'center' },
+  removeBtnText:          { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  editDeptRow:            { flexDirection: 'row', gap: 6, alignItems: 'center' },
+  editDeptInput:          { borderWidth: 1, borderColor: colors.brand, borderRadius: 100, paddingHorizontal: 10, paddingVertical: 4, fontSize: 12, color: colors.black, minWidth: 100 },
+  editDeptSave:           { backgroundColor: colors.brand, borderRadius: 100, paddingHorizontal: 10, paddingVertical: 4 },
+  editDeptSaveText:       { fontSize: 11, fontWeight: typography.semibold, color: colors.white },
+  editDeptCancel:         { borderWidth: 1, borderColor: colors.border, borderRadius: 100, paddingHorizontal: 8, paddingVertical: 4 },
+  editDeptCancelText:     { fontSize: 11, color: colors.muted },
+  shareBtn:               { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingVertical: 12, alignItems: 'center', marginBottom: spacing.md },
+  shareBtnText:           { fontSize: 14, fontWeight: typography.semibold, color: colors.body },
+  confirmBox:             { backgroundColor: colors.white, borderRadius: 20, padding: spacing.xl, width: '85%', alignSelf: 'center', marginTop: 'auto', marginBottom: 'auto' },
+  confirmTitle:           { fontSize: 16, fontWeight: typography.black, color: colors.black, marginBottom: spacing.sm },
+  confirmBody:            { fontSize: 14, color: colors.muted, lineHeight: 21, marginBottom: spacing.lg },
+  confirmBtns:            { flexDirection: 'row', gap: spacing.sm },
+  inviteSheet:            { backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 36 },
+  inviteHeader:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.page, paddingVertical: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  inviteTitle:            { fontSize: 16, fontWeight: typography.bold, color: colors.black },
+  inviteBody:             { padding: spacing.page },
+  emailRow:               { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
+  emailInput:             { flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 10, fontSize: 14, color: colors.black },
+  sendBtn:                { backgroundColor: colors.brand, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 10, justifyContent: 'center' },
+  sendBtnText:            { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  sentConfirm:            { backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#BBF7D0', borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.md },
+  sentConfirmText:        { fontSize: 14, color: '#065F46', fontWeight: typography.semibold },
+  errorText:              { fontSize: 12, color: '#DC2626', marginBottom: spacing.sm },
+  divider:                { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginVertical: spacing.md },
+  dividerLine:            { flex: 1, height: 1, backgroundColor: colors.borderLight },
+  dividerText:            { fontSize: 12, color: colors.placeholder, fontWeight: typography.medium },
+  linkRow:                { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
+  linkBox:                { flex: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, justifyContent: 'center' },
+  linkText:               { fontSize: 12, color: colors.muted },
+  copyBtn:                { backgroundColor: colors.brand, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, justifyContent: 'center', minWidth: 80, alignItems: 'center' },
+  copyBtnDone:            { backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#BBF7D0' },
+  copyBtnText:            { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  copyBtnTextDone:        { color: '#065F46' },
+  inviteNote:             { fontSize: 12, color: colors.subtle, textAlign: 'center', lineHeight: 17 },
 });

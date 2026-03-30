@@ -1,0 +1,2 @@
+[functions.remove-member]
+verify_jwt = false
