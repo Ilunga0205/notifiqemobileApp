@@ -11,7 +11,7 @@ import { login, parseAuthError } from '../../services/auth.service';
 import { useApp } from '../../context/AppContext';
 
 export default function LoginScreen({ navigation }) {
-  const { recheck } = useApp();
+
   const [form,         setForm]         = useState({ email: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [loading,      setLoading]      = useState(false);
@@ -23,25 +23,23 @@ export default function LoginScreen({ navigation }) {
   };
 
   const handleSubmit = async () => {
-    if (!form.email || !form.password) {
-      setError('Please fill in all fields.');
-      return;
-    }
+  if (!form.email || !form.password) {
+    setError('Please fill in all fields.');
+    return;
+  }
 
-    setLoading(true);
-    setError('');
+  setLoading(true);
+  setError('');
 
-    try {
-      await login(form.email, form.password);
-      // ✅ Trigger App.js re-evaluation after login
-      await recheck();
-    } catch (err) {
-      setError(parseAuthError(err));
-    } finally {
-      // ✅ Always stops loading — no more stuck buttons
-      setLoading(false);
-    }
-  };
+  try {
+    await login(form.email, form.password);
+    // ✅ Don't setLoading(false) here — keep spinner going
+    // until SIGNED_IN fires and App.js navigates away
+  } catch (err) {
+    setError(parseAuthError(err));
+    setLoading(false); // ✅ Only stop spinner on error
+  }
+};
 
   return (
     <SafeAreaView style={styles.safe}>

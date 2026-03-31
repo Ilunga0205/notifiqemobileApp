@@ -154,12 +154,13 @@ export const createWorkspace = async (userId, orgName) => {
 // ── Logout ────────────────────────────────────────────────────────────────────
 
 export const logout = async () => {
-  await AsyncStorage.removeItem('notifiqe_onboarding_done');
+  // Scenario 1 — plain logout, touch nothing
   await supabase.auth.signOut();
 };
 
 // ── Leave workspace ───────────────────────────────────────────────────────────
 
+// auth.service.js
 export const leaveWorkspace = async (userId, orgId) => {
   const { data: orgDepts } = await supabase
     .from('departments')
@@ -178,7 +179,33 @@ export const leaveWorkspace = async (userId, orgId) => {
     .update({ status: 'inactive' })
     .eq('user_id', userId)
     .eq('org_id', orgId);
+
+  // ✅ NO signOut here — let the caller handle it
 };
+
+// - delete workspace  ───────────────────────────────────────────────────
+
+export const deleteWorkspace = async (userId, orgId) => {
+  // Scenario 3 — nuke the org, keep auth + profile
+  const { data: orgDepts } = await supabase
+    .from('departments')
+    .select('id')
+    .eq('org_id', orgId);
+
+  const deptIds = (orgDepts || []).map(d => d.id);
+  if (deptIds.length > 0) {
+    await supabase.from('department_members').delete().in('department_id', deptIds);
+    await supabase.from('departments').delete().eq('org_id', orgId);
+  }
+
+  await supabase.from('memberships').delete().eq('org_id', orgId);
+  await supabase.from('organisations').delete().eq('id', orgId);
+
+  // ✅ Sign out after — same flow as leave workspace
+  await supabase.auth.signOut();
+};
+
+
 
 // ── Change password ───────────────────────────────────────────────────────────
 

@@ -9,7 +9,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { useApp } from '../../context/AppContext';
 import { updateName, updateAvatarColor } from '../../services/profile.service';
-import { logout, leaveWorkspace, changePassword as changePasswordService, parseAuthError } from '../../services/auth.service';
+import { logout, leaveWorkspace, clearOnboarding, changePassword as changePasswordService, parseAuthError } from '../../services/auth.service';
 import { supabase } from '../../lib/supabase';
 
 const AVATAR_COLORS = ['#1D4ED8','#065F46','#5B21B6','#9D174D','#92400E','#0369A1','#374151','#7C3AED'];
@@ -163,36 +163,32 @@ export default function ProfileScreen({ navigation }) {
   // ── Leave workspace ───────────────────────────────────────────────────────
 
   const handleLeaveWorkspace = async () => {
-    setConfirmModal(null);
-    try {
-      // Block only if last admin AND other members exist
-      if (isAdmin) {
-        const { data: allMembers } = await supabase
-          .from('memberships')
-          .select('id, role')
-          .eq('org_id', orgId)
-          .in('status', ['active', 'invited']);
+  setConfirmModal(null);
+  try {
+    if (isAdmin) {
+      const { data: allMembers } = await supabase
+        .from('memberships')
+        .select('id, role')
+        .eq('org_id', orgId)
+        .in('status', ['active', 'invited']);
 
-        const otherMembers = (allMembers || []).filter(m => m.id !== undefined);
-        const adminCount   = otherMembers.filter(m => m.role === 'admin').length;
-        const totalCount   = otherMembers.length;
+      const otherMembers = (allMembers || []).filter(m => m.id !== undefined);
+      const adminCount   = otherMembers.filter(m => m.role === 'admin').length;
+      const totalCount   = otherMembers.length;
 
-        // Only block if there are other people but no other admin
-        if (totalCount > 1 && adminCount <= 1) {
-          showToast('You are the only admin. Promote someone else before leaving.');
-          return;
-        }
+      if (totalCount > 1 && adminCount <= 1) {
+        showToast('You are the only admin. Promote someone else before leaving.');
+        return;
       }
-
-      await leaveWorkspace(user.id, orgId);
-      // Navigate to root first to clear the navigation stack
-      navigation.popToTop();
-      // Then trigger App.js re-evaluation
-      await recheck();
-    } catch (err) {
-      showToast('Failed to leave workspace');
     }
-  };
+
+    await leaveWorkspace(user.id, orgId);  // mark inactive
+    await logout();                         // signs out → SIGNED_OUT → Login screen
+
+  } catch (err) {
+    showToast('Failed to leave workspace');
+  }
+};
 
   const pwStrength      = !newPw ? null : newPw.length < 6 ? 'weak' : newPw.length < 10 ? 'fair' : 'strong';
   const pwStrengthColor = { weak: '#DC2626', fair: '#F59E0B', strong: '#10B981' }[pwStrength];

@@ -13,24 +13,30 @@ import { isOnboardingDone, markOnboardingDone } from './src/services/auth.servic
 
 const RootStack = createNativeStackNavigator();
 
-// ── These are defined OUTSIDE Inner so they never get recreated ───────────────
-const AppScreen  = () => <AppNavigator />;
+const AppScreen = () => <AppNavigator />;
 
 function Inner() {
   const { load, setResolve, ready, registering } = useApp();
-  const [appState, setAppState]     = useState('loading');
-  const mounted                     = useRef(true);
+  const [appState, setAppState]   = useState('loading');
+  const appStateRef               = useRef('loading'); // ✅ always current value
+  const mounted                   = useRef(true);
+
+  // ✅ Always update both the ref and the state together
+  const updateAppState = useCallback((s) => {
+    appStateRef.current = s;
+    setAppState(s);
+  }, []);
 
   const completeOnboarding = useCallback(async () => {
     await markOnboardingDone();
-    setAppState('app');
+    updateAppState('app');
   }, []);
 
   const resolve = useCallback(async (session) => {
     try {
       if (!session?.user) {
         await load(null);
-        setAppState('auth');
+        updateAppState('auth');
         return;
       }
 
@@ -42,67 +48,87 @@ function Inner() {
         .limit(1);
 
       if (!memberships?.length) {
+        console.log('No active membership found');
         const { data: profile } = await supabase
           .from('profiles')
           .select('id')
           .eq('id', session.user.id)
           .maybeSingle();
 
+        console.log('Profile exists:', !!profile);
+
         if (!profile) {
+          console.log('No profile → signing out');
           await supabase.auth.signOut();
-          setAppState('auth');
+          updateAppState('auth');
           return;
         }
 
+        console.log('Has profile → no_workspace');
         await load(null);
-        setAppState('no_workspace');
+        updateAppState('no_workspace');
         return;
       }
 
       await load(session.user.id);
       const done = await isOnboardingDone();
-      setAppState(done ? 'app' : 'onboarding');
+      console.log('resolve → about to setAppState, done:', done);
+      updateAppState(done ? 'app' : 'onboarding');
 
     } catch (err) {
-      console.warn('resolve error:', err.message);
-      setAppState('auth');
+      console.warn('resolve error FULL:', err);
+      updateAppState('auth');
     }
   }, [load]);
 
+  // ✅ Keep setResolve in sync
   useEffect(() => {
     setResolve(resolve);
   }, [resolve]);
 
+  // ✅ Initial session check
   useEffect(() => {
     mounted.current = true;
 
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!mounted.current) return;
-      if (!user) { setAppState('auth'); return; }
+      if (!user) {
+        updateAppState('auth');
+        return;
+      }
       resolve({ user });
     });
 
+    return () => {
+      mounted.current = false;
+    };
+  }, [resolve]);
+
+  // ✅ Auth state listener
+  useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        console.log('AUTH EVENT:', event, 'registering:', registering.current, 'appState:', appStateRef.current);
+
         if (!mounted.current) return;
+
         if (event === 'SIGNED_OUT') {
-          console.log('SIGNED_OUT → auth');
+          registering.current = false;
           await load(null);
-          setAppState('auth');
+          updateAppState('auth');
         }
-        // ✅ Ignore SIGNED_IN during registration — RegisterScreen handles its own flow
-        if (event === 'SIGNED_IN' && !registering.current) {
-          console.log('SIGNED_IN → resolve');
+
+        // ✅ Ignore SIGNED_IN if already in the app — prevents leave-workspace
+        // from firing resolve() while Login screen is mounted with spinner running
+        if (event === 'SIGNED_IN' && !registering.current && appStateRef.current !== 'app') {
+          console.log('SIGNED_IN → calling resolve with user:', session?.user?.id);
           resolve(session);
         }
       }
     );
 
-    return () => {
-      mounted.current = false;
-      subscription.unsubscribe();
-    };
-  }, []);
+    return () => subscription.unsubscribe();
+  }, [resolve]);
 
   if (appState === 'loading' || (appState === 'app' && !ready)) {
     return (
@@ -127,10 +153,12 @@ function Inner() {
     appState === 'onboarding'   ? 'Onboarding'  :
     'Login';
 
-  // ✅ AuthScreen is stable — created once per appState value
-  // completeOnboarding is memoized so it never changes reference
   return (
-    <NavigationContainer>
+    // ✅ key={authInitialRoute} forces a full remount of NavigationContainer
+    // whenever the target screen changes (e.g. Login → NoWorkspace).
+    // This is necessary because initialRoute is read-once on mount —
+    // changing it as a prop has no effect on an already-mounted navigator.
+    <NavigationContainer key={authInitialRoute}>
       <RootStack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
         <RootStack.Screen name="Auth">
           {(props) => (

@@ -10,7 +10,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { useApp } from '../../context/AppContext';
 import { updateOrgName, updateTimezone, regenerateInviteToken, buildInviteLink } from '../../services/org.service';
-import { logout } from '../../services/auth.service';
+import { logout, clearOnboarding } from '../../services/auth.service';
 import { supabase } from '../../lib/supabase';
 
 const TIMEZONES = [
@@ -273,7 +273,8 @@ export default function SettingsScreen({ navigation }) {
         return;
       }
 
-      // Safe to delete — only admin remains
+      // Delete in correct order — org and dept cleanup BEFORE membership
+      // (once membership is deleted, get_my_org_id() returns null and RLS blocks everything)
       const { data: depts } = await supabase
         .from('departments').select('id').eq('org_id', orgId);
       const deptIds = (depts || []).map(d => d.id);
@@ -281,10 +282,12 @@ export default function SettingsScreen({ navigation }) {
         await supabase.from('department_members').delete().in('department_id', deptIds);
       }
       await supabase.from('departments').delete().eq('org_id', orgId);
-      await supabase.from('memberships').delete().eq('org_id', orgId);
       await supabase.from('organisations').delete().eq('id', orgId);
+      // Delete membership last — after this get_my_org_id() returns null
+      await supabase.from('memberships').delete().eq('org_id', orgId);
 
-      // Sign out → Login screen
+      // Clear onboarding flag so new workspace shows Onboarding
+      await clearOnboarding();
       await logout();
 
     } catch (err) {
