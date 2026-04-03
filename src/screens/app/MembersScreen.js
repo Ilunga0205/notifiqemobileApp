@@ -1,10 +1,11 @@
 // src/screens/app/MembersScreen.js
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
-  StyleSheet, SafeAreaView, Modal, Pressable,
+  StyleSheet,  Modal, Pressable,
   KeyboardAvoidingView, Platform, StatusBar, Share, Alert,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { useApp } from '../../context/AppContext';
 import { supabase } from '../../lib/supabase';
@@ -96,15 +97,19 @@ function MemberDetailSheet({ member, departments, adminCount, currentUserId, isA
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [saving,        setSaving]        = useState(false);
 
-  const isSelf       = member.user_id === currentUserId;
-  const isLastAdmin  = member.role === 'admin' && adminCount <= 1;
-  const roleIsLocked = isSelf || isLastAdmin || !isAdmin;
-  const canEdit      = !isSelf;
+  const isSelf        = member.user_id === currentUserId;
+  const isLastAdmin   = member.role === 'admin' && adminCount <= 1;
+  const roleIsLocked  = isSelf || isLastAdmin || !isAdmin;
+  // Admins can edit depts for anyone including themselves
+  // But cannot change their own role
+  const canEditDepts  = isAdmin;
+  const canEditRole   = isAdmin && !isSelf;
+  const canRemove     = isAdmin && !isSelf;
 
   const toggleDept = (id) => {
-    const dept      = departments.find(d => d.id === id);
-    const isGeneral = dept?.name.toLowerCase() === 'general';
-    if (isGeneral && memberDepts.length === 1) return;
+    const isCurrentlyIn = memberDepts.includes(id);
+    // Block removing if it would leave member with zero departments
+    if (isCurrentlyIn && memberDepts.length === 1) return;
     setMemberDepts(prev => prev.includes(id) ? prev.filter(d => d !== id) : [...prev, id]);
   };
 
@@ -112,7 +117,8 @@ function MemberDetailSheet({ member, departments, adminCount, currentUserId, isA
   const handleSave = async () => {
     setSaving(true);
     try {
-      await updateMember(member, role, memberDepts);
+      const orgDeptIds = departments.map(d => d.id);
+      await updateMember(member, role, memberDepts, orgDeptIds);
       const updatedDepts = departments.filter(d => memberDepts.includes(d.id));
       onUpdate({ ...member, role, department_ids: memberDepts, departments: updatedDepts });
       onClose();
@@ -185,17 +191,16 @@ function MemberDetailSheet({ member, departments, adminCount, currentUserId, isA
               <View style={styles.deptList}>
                 {departments.map(dept => {
                   const isIn      = memberDepts.includes(dept.id);
-                  const isGeneral = dept.name.toLowerCase() === 'general';
-                  const isLocked  = isGeneral && memberDepts.length === 1 && isIn;
+                  const isLocked  = memberDepts.length === 1 && isIn; // last dept — can't remove
                   return (
                     <TouchableOpacity
                       key={dept.id}
                       style={[styles.deptRow, isIn && { borderColor: (member.avatar_color || colors.brand) + '40', backgroundColor: (member.avatar_color || colors.brand) + '08' }]}
-                      onPress={() => canEdit && !isLocked && toggleDept(dept.id)}
-                      activeOpacity={canEdit && !isLocked ? 0.8 : 1}
+                      onPress={() => canEditDepts && !isLocked ? toggleDept(dept.id) : null}
+                      activeOpacity={canEditDepts && !isLocked ? 0.8 : 1}
                     >
                       <Text style={styles.deptRowName}>{dept.name}</Text>
-                      {isLocked && <View style={styles.defaultChip}><Text style={styles.defaultChipText}>default</Text></View>}
+                      {isLocked && <View style={styles.defaultChip}><Text style={styles.defaultChipText}>last dept</Text></View>}
                       <View style={[styles.deptCheck, isIn && { backgroundColor: colors.brand, borderColor: colors.brand }]}>
                         {isIn && <Text style={styles.deptCheckMark}>✓</Text>}
                       </View>
@@ -227,13 +232,13 @@ function MemberDetailSheet({ member, departments, adminCount, currentUserId, isA
                     <TouchableOpacity style={styles.cancelBtn} onPress={onClose} activeOpacity={0.8}>
                       <Text style={styles.cancelBtnText}>Cancel</Text>
                     </TouchableOpacity>
-                    {canEdit && (
+                    {canEditDepts && (
                       <TouchableOpacity style={[styles.saveBtn, saving && { opacity: 0.6 }]} onPress={handleSave} disabled={saving} activeOpacity={0.85}>
                         <Text style={styles.saveBtnText}>{saving ? '...' : 'Save changes'}</Text>
                       </TouchableOpacity>
                     )}
                   </View>
-                  {canEdit && (
+                  {canRemove && (
                     <TouchableOpacity onPress={() => setConfirmRemove(true)} style={styles.removeLink}>
                       <Text style={styles.removeLinkText}>Remove from workspace</Text>
                     </TouchableOpacity>
@@ -251,7 +256,7 @@ function MemberDetailSheet({ member, departments, adminCount, currentUserId, isA
 
 // ── Invite modal ──────────────────────────────────────────────────────────────
 
-function InviteModal({ visible, onClose, orgName, orgSlug, orgToken }) {
+function InviteModal({ visible, onClose, orgName, orgSlug, orgToken, isAdmin }) {
   const [copied,    setCopied]    = useState(false);
   const [email,     setEmail]     = useState('');
   const [emailSent, setEmailSent] = useState(false);
@@ -284,23 +289,30 @@ function InviteModal({ visible, onClose, orgName, orgSlug, orgToken }) {
               </TouchableOpacity>
             </View>
             <View style={styles.inviteBody}>
-              <Text style={styles.sectionLabel}>INVITE BY EMAIL</Text>
-              {emailSent ? (
-                <View style={styles.sentConfirm}><Text style={styles.sentConfirmText}>✓  Invite sent to {email}</Text></View>
-              ) : (
+              {isAdmin && (
                 <>
-                  <View style={styles.emailRow}>
-                    <TextInput style={[styles.emailInput, error && { borderColor: '#FECACA' }]} placeholder="colleague@company.com" placeholderTextColor={colors.placeholder} value={email} onChangeText={v => { setEmail(v); setError(''); }} keyboardType="email-address" autoCapitalize="none" />
-                    <TouchableOpacity style={styles.sendBtn} onPress={handleSend} activeOpacity={0.85}><Text style={styles.sendBtnText}>Send</Text></TouchableOpacity>
+                  <Text style={styles.sectionLabel}>INVITE BY EMAIL</Text>
+                  {emailSent ? (
+                    <View style={styles.sentConfirm}><Text style={styles.sentConfirmText}>✓  Invite sent to {email}</Text></View>
+                  ) : (
+                    <>
+                      <View style={styles.emailRow}>
+                        <TextInput style={[styles.emailInput, error && { borderColor: '#FECACA' }]} placeholder="colleague@company.com" placeholderTextColor={colors.placeholder} value={email} onChangeText={v => { setEmail(v); setError(''); }} keyboardType="email-address" autoCapitalize="none" />
+                        <TouchableOpacity style={styles.sendBtn} onPress={handleSend} activeOpacity={0.85}><Text style={styles.sendBtnText}>Send</Text></TouchableOpacity>
+                      </View>
+                      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+                    </>
+                  )}
+                  <View style={styles.divider}>
+                    <View style={styles.dividerLine} />
+                    <Text style={styles.dividerText}>or share link</Text>
+                    <View style={styles.dividerLine} />
                   </View>
-                  {error ? <Text style={styles.errorText}>{error}</Text> : null}
                 </>
               )}
-              <View style={styles.divider}>
-                <View style={styles.dividerLine} />
-                <Text style={styles.dividerText}>or share link</Text>
-                <View style={styles.dividerLine} />
-              </View>
+              {!isAdmin && (
+                <Text style={styles.sectionLabel}>SHARE INVITE LINK</Text>
+              )}
               <View style={styles.linkRow}>
                 <View style={styles.linkBox}><Text style={styles.linkText} numberOfLines={1}>{inviteLink}</Text></View>
                 <TouchableOpacity style={[styles.copyBtn, copied && styles.copyBtnDone]} onPress={handleCopy} activeOpacity={0.85}>
@@ -310,7 +322,11 @@ function InviteModal({ visible, onClose, orgName, orgSlug, orgToken }) {
               <TouchableOpacity style={styles.shareBtn} onPress={handleShare} activeOpacity={0.85}>
                 <Text style={styles.shareBtnText}>Share invite link</Text>
               </TouchableOpacity>
-              <Text style={styles.inviteNote}>New members need admin approval before they can access the workspace</Text>
+              <Text style={styles.inviteNote}>
+                {isAdmin
+                  ? 'New members will need your approval before they can access the workspace.'
+                  : 'Share this link with anyone you want to invite. An admin will need to approve them before they get access.'}
+              </Text>
             </View>
           </Pressable>
         </KeyboardAvoidingView>
@@ -325,7 +341,7 @@ export default function MembersScreen() {
   // ✅ Org data from AppContext — no extra Supabase call needed
   const { user, org, orgId, orgName, isAdmin } = useApp();
 
-  const [loading,        setLoading]        = useState(true);
+  const [loading,        setLoading]        = useState(true); // always true until data loads
   const [members,        setMembers]        = useState([]);
   const [pending,        setPending]        = useState([]);
   const [departments,    setDepartments]    = useState([]);
@@ -343,8 +359,12 @@ export default function MembersScreen() {
 
   // ── Load data using services ──────────────────────────────────────────────
 
-  const loadData = useCallback(async () => {
-    if (!orgId) return;
+  const loadData = useCallback(async (showSpinner = false) => {
+    if (!orgId) {
+      // orgId not ready yet — keep spinner, don't show empty state
+      return;
+    }
+    if (showSpinner) setLoading(true);
     try {
       const [freshMembers, freshPending, freshDepts] = await Promise.all([
         getMembers(orgId),
@@ -361,18 +381,26 @@ export default function MembersScreen() {
     }
   }, [orgId]);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  // ✅ Ref always points to latest loadData — no stale closure in realtime
+  const loadDataRef = useRef(loadData);
+  useEffect(() => { loadDataRef.current = loadData; });
+
+  useEffect(() => {
+    if (orgId) loadData(true);
+  }, [orgId, loadData]);
 
   // ── Realtime subscriptions ────────────────────────────────────────────────
 
   useEffect(() => {
     if (!orgId) return;
+    const reload = () => loadDataRef.current?.();
     const channel = supabase
       .channel(`members-${orgId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'memberships',     filter: `org_id=eq.${orgId}` }, loadData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'join_requests',   filter: `org_id=eq.${orgId}` }, loadData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'departments',     filter: `org_id=eq.${orgId}` }, loadData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' },                                      loadData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'memberships',       filter: `org_id=eq.${orgId}` }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'join_requests',     filter: `org_id=eq.${orgId}` }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'departments',       filter: `org_id=eq.${orgId}` }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'department_members'                               }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles'                                         }, reload)
       .subscribe();
     return () => supabase.removeChannel(channel);
   }, [orgId, loadData]);
@@ -458,8 +486,8 @@ export default function MembersScreen() {
   if (loading) return (
     <View style={[styles.root, { backgroundColor: '#F3F4F6' }]}>
       {Platform.OS === 'ios' ? (
-        <SafeAreaView style={{ backgroundColor: colors.white }}>
-          <View style={styles.appHeader}>
+        <SafeAreaView edges={['top']} style={{ backgroundColor: colors.white }}>
+          <View style={[styles.appHeader, { borderBottomWidth: 1, borderBottomColor: colors.borderLight }]}>
             <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
           </View>
         </SafeAreaView>
@@ -490,8 +518,8 @@ export default function MembersScreen() {
 
       {/* Header */}
       {Platform.OS === 'ios' ? (
-        <SafeAreaView style={{ backgroundColor: colors.white }}>
-          <View style={styles.appHeader}>
+        <SafeAreaView edges={['top']} style={{ backgroundColor: colors.white }}>
+          <View style={[styles.appHeader, { borderBottomWidth: 1, borderBottomColor: colors.borderLight }]}>
             <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
             <Text style={styles.appSep}>/</Text>
             <Text style={styles.appOrg}>{orgName}</Text>
@@ -677,6 +705,7 @@ export default function MembersScreen() {
         orgName={orgName}
         orgSlug={org?.slug}
         orgToken={org?.invite_token}
+        isAdmin={isAdmin}
       />
     </View>
   );

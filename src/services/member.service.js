@@ -23,8 +23,9 @@ export const getMembers = async (orgId) => {
       .select('id, full_name, email, avatar_color, avatar_initials')
       .in('id', userIds),
     supabase.from('department_members')
-      .select('user_id, departments(id, name)')
-      .in('user_id', userIds),
+      .select('user_id, departments!inner(id, name, org_id)')
+      .in('user_id', userIds)
+      .eq('departments.org_id', orgId),
   ]);
 
   const profileMap = {};
@@ -85,7 +86,13 @@ export const getPendingRequests = async (orgId) => {
 export const getDepartments = async (orgId) => {
   const { data, error } = await supabase
     .from('departments')
-    .select('id, name, slug')
+    .select(`
+      id, name, slug,
+      department_members(
+        user_id,
+        profiles(id, full_name, avatar_color, avatar_initials)
+      )
+    `)
     .eq('org_id', orgId)
     .order('name');
   if (error) throw error;
@@ -94,17 +101,23 @@ export const getDepartments = async (orgId) => {
 
 // ── Update member role + departments ─────────────────────────────────────────
 
-export const updateMember = async (member, role, departmentIds) => {
+export const updateMember = async (member, role, departmentIds, orgDeptIds) => {
+  // Update role
   await supabase
     .from('memberships')
     .update({ role })
     .eq('id', member.membership_id);
 
-  await supabase
-    .from('department_members')
-    .delete()
-    .eq('user_id', member.user_id);
+  // ✅ Only delete dept memberships within THIS org — not other orgs
+  if (orgDeptIds && orgDeptIds.length > 0) {
+    await supabase
+      .from('department_members')
+      .delete()
+      .eq('user_id', member.user_id)
+      .in('department_id', orgDeptIds);
+  }
 
+  // Re-insert selected departments
   if (departmentIds.length > 0) {
     await supabase.from('department_members').insert(
       departmentIds.map(dId => ({ department_id: dId, user_id: member.user_id }))

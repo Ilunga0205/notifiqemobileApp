@@ -11,8 +11,10 @@ import { Button, StepIndicator, Divider } from '../../components/UI';
 import { supabase } from '../../lib/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { markOnboardingDone } from '../../services/auth.service';
+import { useApp } from '../../context/AppContext';
 
 export default function OnboardingScreen({ navigation, completeOnboarding }) {
+  const { orgId, setActivePostTypes } = useApp();
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -54,6 +56,14 @@ export default function OnboardingScreen({ navigation, completeOnboarding }) {
   }, []);
 
   const handleFinish = async () => {
+    // Save active post types to org_settings
+    if (orgId) {
+      const activeTypes = postTypes.filter(pt => pt.enabled).map(pt => pt.id);
+      await supabase
+        .from('org_settings')
+        .upsert({ org_id: orgId, active_post_types: activeTypes }, { onConflict: 'org_id' });
+      if (setActivePostTypes) setActivePostTypes(activeTypes);
+    }
     await markOnboardingDone();
     if (completeOnboarding) await completeOnboarding();
   };

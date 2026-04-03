@@ -3,15 +3,16 @@
 // Global store for the current user's profile and org.
 // App.js handles auth state — AppContext only loads data once logged in.
 
-import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const AppContext = createContext(null);
 
 const CACHE = {
-  profile: 'notifiqe_profile',
-  org:     'notifiqe_org',
+  profile:   'notifiqe_profile',
+  org:       'notifiqe_org',
+  postTypes: 'notifiqe_post_types',
 };
 
 export function AppProvider({ children }) {
@@ -20,6 +21,7 @@ export function AppProvider({ children }) {
   const [profile, setProfile] = useState(null);
   const [org,     setOrg]     = useState(null);
   const [role,    setRole]    = useState(null);
+  const [activePostTypes, setActivePostTypes] = useState(null); // null = not loaded yet
   const [ready,   setReady]   = useState(false); // true after first load()
   const resolveRef = useRef(null); // ✅ holds App.js resolve function
 
@@ -40,7 +42,8 @@ export function AppProvider({ children }) {
       setProfile(null);
       setOrg(null);
       setRole(null);
-      await AsyncStorage.multiRemove([CACHE.profile, CACHE.org]);
+      setActivePostTypes(null);
+      await AsyncStorage.multiRemove([CACHE.profile, CACHE.org, CACHE.postTypes]);
       setReady(true);
       return;
     }
@@ -51,12 +54,14 @@ export function AppProvider({ children }) {
     console.log('AppContext load() called with userId:', userId);
 
     // Show cached data immediately
-    const [cachedProfile, cachedOrg] = await Promise.all([
+    const [cachedProfile, cachedOrg, cachedPostTypes] = await Promise.all([
       AsyncStorage.getItem(CACHE.profile),
       AsyncStorage.getItem(CACHE.org),
+      AsyncStorage.getItem(CACHE.postTypes),
     ]);
-    if (cachedProfile) setProfile(JSON.parse(cachedProfile));
-    if (cachedOrg)     setOrg(JSON.parse(cachedOrg));
+    if (cachedProfile)   setProfile(JSON.parse(cachedProfile));
+    if (cachedOrg)       setOrg(JSON.parse(cachedOrg));
+    if (cachedPostTypes) setActivePostTypes(JSON.parse(cachedPostTypes));
 
     // Fetch fresh data in background
     try {
@@ -72,7 +77,7 @@ export function AppProvider({ children }) {
           .select('role, organisations(id, name, slug, timezone, invite_token, logo_url)')
           .eq('user_id', userId)
           .eq('status', 'active')
-          .maybeSingle(), // ← maybeSingle so it doesn't throw if no active membership
+          .maybeSingle(),
       ]);
 
       const freshProfile = profileRes.data;
@@ -87,6 +92,16 @@ export function AppProvider({ children }) {
         setOrg(freshOrg);
         setRole(freshRole);
         await AsyncStorage.setItem(CACHE.org, JSON.stringify(freshOrg));
+
+        // Load active post types from org_settings
+        const { data: settings } = await supabase
+          .from('org_settings')
+          .select('active_post_types')
+          .eq('org_id', freshOrg.id)
+          .maybeSingle();
+        const types = settings?.active_post_types || ['announcement','leave_notice','project_update','quick_question','team_win','general_update'];
+        setActivePostTypes(types);
+        await AsyncStorage.setItem(CACHE.postTypes, JSON.stringify(types));
       }
       console.log('AppContext loaded — profile:', freshProfile?.full_name, 'org:', freshOrg?.name, 'role:', freshRole);
     } catch (err) {
@@ -116,6 +131,39 @@ export function AppProvider({ children }) {
   const orgName     = org?.name || '';
   const orgId       = org?.id || null;
 
+  // ── Realtime — sync org name + settings to ALL devices ──────────────────
+  useEffect(() => {
+    if (!org?.id) return;
+    const channel = supabase
+      .channel(`org-context-${org.id}`)
+      // Org name / settings changes
+      .on('postgres_changes', {
+        event:  'UPDATE',
+        schema: 'public',
+        table:  'organisations',
+        filter: `id=eq.${org.id}`,
+      }, async (payload) => {
+        if (!payload.new) return;
+        const updatedOrg = { ...org, ...payload.new };
+        setOrg(updatedOrg);
+        await AsyncStorage.setItem(CACHE.org, JSON.stringify(updatedOrg));
+      })
+      // Post types changes
+      .on('postgres_changes', {
+        event:  'UPDATE',
+        schema: 'public',
+        table:  'org_settings',
+        filter: `org_id=eq.${org.id}`,
+      }, async (payload) => {
+        const types = payload.new?.active_post_types;
+        if (!types) return;
+        setActivePostTypes(types);
+        await AsyncStorage.setItem(CACHE.postTypes, JSON.stringify(types));
+      })
+      .subscribe();
+    return () => supabase.removeChannel(channel);
+  }, [org?.id]);
+
   return (
     <AppContext.Provider value={{
       // Auth
@@ -129,6 +177,8 @@ export function AppProvider({ children }) {
       org,
       orgId,
       orgName,
+      activePostTypes,
+      setActivePostTypes,
       // Role
       role,
       isAdmin,

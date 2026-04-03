@@ -1,90 +1,121 @@
 // src/services/calendar.service.js
-//
-// All calendar-related DB operations.
-// Events, leave notices, RSVPs.
-
 import { supabase } from '../lib/supabase';
 
-// ── Fetch events for a month ──────────────────────────────────────────────────
+// ── Event type config ─────────────────────────────────────────────────────────
 
-export const getEvents = async (orgId, year, month) => {
-  const start = new Date(year, month - 1, 1).toISOString();
-  const end   = new Date(year, month,     0, 23, 59, 59).toISOString();
+export const EVENT_TYPES = [
+  { id: 'meeting',  label: 'Meeting',  color: '#1D4ED8', bg: '#EFF6FF' },
+  { id: 'event',    label: 'Event',    color: '#5B21B6', bg: '#F5F3FF' },
+  { id: 'deadline', label: 'Deadline', color: '#DC2626', bg: '#FEF2F2' },
+];
+
+export const LEAVE_TYPES = [
+  'Annual leave',
+  'Sick leave',
+  'Family leave',
+  'Public holiday',
+  'Other',
+];
+
+export const getEventType = (id) =>
+  EVENT_TYPES.find(t => t.id === id) || EVENT_TYPES[0];
+
+// ── Fetch all calendar data for a month ───────────────────────────────────────
+
+export const getCalendarData = async (orgId, year, month) => {
+  // First and last day of month with buffer
+  const firstDay = `${year}-${String(month).padStart(2,'0')}-01`;
+  const lastDay  = new Date(year, month, 0).toISOString().split('T')[0];
+
+  const [eventsRes, leaveRes] = await Promise.all([
+    supabase
+      .from('calendar_events')
+      .select(`
+        id, title, type, start_date, end_date,
+        start_time, end_time, location, zoom_link, note, created_at,
+        creator:profiles!calendar_events_creator_id_fkey(id, full_name, avatar_color, avatar_initials),
+        event_invitees(
+          id, user_id, rsvp,
+          profiles(id, full_name, avatar_color, avatar_initials)
+        )
+      `)
+      .eq('org_id', orgId)
+      .lte('start_date', lastDay)
+      .gte('end_date', firstDay)
+      .order('start_date', { ascending: true }),
+
+    supabase
+      .from('leave_events')
+      .select(`
+        id, user_id, start_date, end_date, leave_type, created_at,
+        profiles(id, full_name, avatar_color, avatar_initials)
+      `)
+      .eq('org_id', orgId)
+      .lte('start_date', lastDay)
+      .gte('end_date', firstDay)
+      .order('start_date', { ascending: true }),
+  ]);
+
+  return {
+    events: (eventsRes.data || []).map(formatEvent),
+    leave:  (leaveRes.data  || []).map(formatLeave),
+  };
+};
+
+// ── Fetch upcoming events (for dashboard / feed banner) ───────────────────────
+
+export const getUpcomingEvents = async (orgId, limit = 5) => {
+  const today = new Date().toISOString().split('T')[0];
 
   const { data, error } = await supabase
     .from('calendar_events')
     .select(`
-      id, title, type, start_date, end_date, all_day, description,
-      created_by,
-      organiser:profiles!calendar_events_created_by_fkey(id, full_name, avatar_color, avatar_initials),
-      rsvps:event_rsvps(user_id, status)
+      id, title, type, start_date, start_time, location,
+      event_invitees(user_id)
     `)
     .eq('org_id', orgId)
-    .gte('start_date', start)
-    .lte('start_date', end)
-    .order('start_date', { ascending: true });
+    .gte('start_date', today)
+    .order('start_date', { ascending: true })
+    .limit(limit);
 
   if (error) throw error;
-  return data || [];
+  return (data || []).map(formatEvent);
 };
 
-// ── Fetch leave notices ───────────────────────────────────────────────────────
+// ── Create calendar event ─────────────────────────────────────────────────────
 
-export const getLeaveNotices = async (orgId, year, month) => {
-  const start = new Date(year, month - 1, 1).toISOString();
-  const end   = new Date(year, month,     0, 23, 59, 59).toISOString();
-
-  const { data, error } = await supabase
-    .from('leave_notices')
-    .select(`
-      id, start_date, end_date, note,
-      member:profiles!leave_notices_user_id_fkey(id, full_name, avatar_color, avatar_initials)
-    `)
-    .eq('org_id', orgId)
-    .gte('start_date', start)
-    .lte('end_date', end)
-    .order('start_date', { ascending: true });
-
-  if (error) throw error;
-  return data || [];
-};
-
-// ── Create event ──────────────────────────────────────────────────────────────
-
-export const createEvent = async ({
-  orgId,
-  createdBy,
-  title,
-  type,
-  startDate,
-  endDate,
-  allDay = true,
-  description,
-  inviteUserIds = [],
+export const createCalendarEvent = async ({
+  orgId, creatorId, title, type,
+  startDate, endDate, startTime, endTime,
+  location, zoomLink, note, inviteeIds = [],
 }) => {
   const { data: event, error } = await supabase
     .from('calendar_events')
     .insert({
-      org_id:      orgId,
-      created_by:  createdBy,
-      title,
+      org_id:     orgId,
+      creator_id: creatorId,
+      title:      title.trim(),
       type,
-      start_date:  startDate,
-      end_date:    endDate || startDate,
-      all_day:     allDay,
-      description,
+      start_date: startDate,
+      end_date:   endDate || startDate,
+      start_time: startTime || null,
+      end_time:   endTime   || null,
+      location:   location  || null,
+      zoom_link:  zoomLink  || null,
+      note:       note      || null,
     })
     .select()
     .single();
+
   if (error) throw error;
 
-  // Add invited members as 'pending' RSVPs
-  if (inviteUserIds.length > 0) {
-    await supabase.from('event_rsvps').insert(
-      inviteUserIds.map(userId => ({
+  // Add invitees
+  if (inviteeIds.length > 0) {
+    await supabase.from('event_invitees').insert(
+      inviteeIds.map(userId => ({
         event_id: event.id,
         user_id:  userId,
-        status:   'pending',
+        rsvp:     'pending',
       }))
     );
   }
@@ -92,45 +123,44 @@ export const createEvent = async ({
   return event;
 };
 
-// ── Create leave notice ───────────────────────────────────────────────────────
+// ── Update calendar event ─────────────────────────────────────────────────────
 
-export const createLeaveNotice = async ({
-  orgId,
-  userId,
-  startDate,
-  endDate,
-  note,
-}) => {
-  const { data, error } = await supabase
-    .from('leave_notices')
-    .insert({
-      org_id:     orgId,
-      user_id:    userId,
-      start_date: startDate,
-      end_date:   endDate,
-      note,
-    })
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
-};
-
-// ── RSVP to event ─────────────────────────────────────────────────────────────
-
-export const rsvpEvent = async (eventId, userId, status) => {
+export const updateCalendarEvent = async (eventId, updates, inviteeIds) => {
   const { error } = await supabase
-    .from('event_rsvps')
-    .upsert(
-      { event_id: eventId, user_id: userId, status },
-      { onConflict: 'event_id,user_id' }
-    );
+    .from('calendar_events')
+    .update({
+      title:      updates.title?.trim(),
+      type:       updates.type,
+      start_date: updates.startDate,
+      end_date:   updates.endDate || updates.startDate,
+      start_time: updates.startTime || null,
+      end_time:   updates.endTime   || null,
+      location:   updates.location  || null,
+      zoom_link:  updates.zoomLink  || null,
+      note:       updates.note      || null,
+    })
+    .eq('id', eventId);
+
   if (error) throw error;
+
+  // Replace invitees if provided
+  if (inviteeIds !== undefined) {
+    await supabase.from('event_invitees').delete().eq('event_id', eventId);
+    if (inviteeIds.length > 0) {
+      await supabase.from('event_invitees').insert(
+        inviteeIds.map(userId => ({
+          event_id: eventId,
+          user_id:  userId,
+          rsvp:     'pending',
+        }))
+      );
+    }
+  }
 };
 
-// ── Delete event ──────────────────────────────────────────────────────────────
+// ── Delete calendar event ─────────────────────────────────────────────────────
 
-export const deleteEvent = async (eventId) => {
+export const deleteCalendarEvent = async (eventId) => {
   const { error } = await supabase
     .from('calendar_events')
     .delete()
@@ -138,12 +168,95 @@ export const deleteEvent = async (eventId) => {
   if (error) throw error;
 };
 
-// ── Delete leave notice ───────────────────────────────────────────────────────
+// ── Create leave event ────────────────────────────────────────────────────────
 
-export const deleteLeaveNotice = async (noticeId) => {
+export const createLeaveEvent = async ({
+  orgId, userId, startDate, endDate, leaveType,
+}) => {
+  const { data, error } = await supabase
+    .from('leave_events')
+    .insert({
+      org_id:     orgId,
+      user_id:    userId,
+      start_date: startDate,
+      end_date:   endDate || startDate,
+      leave_type: leaveType || 'Annual leave',
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+};
+
+// ── Delete leave event ────────────────────────────────────────────────────────
+
+export const deleteLeaveEvent = async (leaveId) => {
   const { error } = await supabase
-    .from('leave_notices')
+    .from('leave_events')
     .delete()
-    .eq('id', noticeId);
+    .eq('id', leaveId);
   if (error) throw error;
 };
+
+// ── RSVP ──────────────────────────────────────────────────────────────────────
+
+export const rsvpEvent = async (eventId, userId, rsvp) => {
+  const { error } = await supabase
+    .from('event_invitees')
+    .update({ rsvp })
+    .eq('event_id', eventId)
+    .eq('user_id', userId);
+  if (error) throw error;
+};
+
+// ── Format helpers ────────────────────────────────────────────────────────────
+
+const formatEvent = (raw) => {
+  const typeInfo = getEventType(raw.type);
+  return {
+    id:         raw.id,
+    type:       raw.type,
+    kind:       'event',
+    title:      raw.title,
+    color:      typeInfo.color,
+    bg:         typeInfo.bg,
+    startDate:  raw.start_date,
+    endDate:    raw.end_date || raw.start_date,
+    startTime:  raw.start_time || null,
+    endTime:    raw.end_time   || null,
+    location:   raw.location   || '',
+    zoomLink:   raw.zoom_link  || '',
+    note:       raw.note       || '',
+    createdAt:  raw.created_at,
+    creatorId:  raw.creator?.id,
+    creator:    raw.creator?.full_name || 'Unknown',
+    creatorInitials: raw.creator?.avatar_initials ||
+      (raw.creator?.full_name || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2),
+    creatorColor: raw.creator?.avatar_color || '#1D4ED8',
+    invitees:   (raw.event_invitees || []).map(i => ({
+      id:       i.id,
+      userId:   i.user_id,
+      rsvp:     i.rsvp,
+      name:     i.profiles?.full_name || '',
+      initials: i.profiles?.avatar_initials ||
+        (i.profiles?.full_name || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2),
+      color:    i.profiles?.avatar_color || '#6B7280',
+    })),
+  };
+};
+
+const formatLeave = (raw) => ({
+  id:        raw.id,
+  kind:      'leave',
+  type:      'leave',
+  color:     raw.profiles?.avatar_color || '#065F46',
+  bg:        '#ECFDF5',
+  title:     raw.leave_type || 'Leave',
+  userId:    raw.user_id,
+  name:      raw.profiles?.full_name || '',
+  initials:  raw.profiles?.avatar_initials ||
+    (raw.profiles?.full_name || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2),
+  startDate: raw.start_date,
+  endDate:   raw.end_date || raw.start_date,
+  createdAt: raw.created_at,
+});

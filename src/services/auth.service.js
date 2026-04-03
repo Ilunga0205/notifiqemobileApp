@@ -46,15 +46,12 @@ export const register = async ({ fullName, email, password, orgName, orgSize }) 
   let userId;
 
   if (signUpError) {
-    // User already exists from failed attempt — get their ID via admin-free method
-    // We'll get the ID after sign in below
     if (!signUpError.message?.includes('already registered')) throw signUpError;
   } else {
     userId = signUpData.user?.id;
   }
 
-  // 2. Create org atomically — using userId from signUp if available
-  // If signUp failed (user exists), we need to sign in first to get userId
+  // If signUp failed (user already exists), sign in to get userId
   if (!userId) {
     const { data: tempSignIn, error: tempError } = await supabase.auth.signInWithPassword({
       email: email.trim().toLowerCase(),
@@ -64,20 +61,16 @@ export const register = async ({ fullName, email, password, orgName, orgSize }) 
     userId = tempSignIn.user.id;
   }
 
+  // 2. Create org + profile + membership + dept atomically via DB function
   const { data: org, error: orgError } = await supabase.rpc('create_workspace', {
     org_name:   orgName.trim(),
     org_slug:   slug,
     p_user_id:  userId,
   });
-  if (orgError) {
-    if (orgError.message?.includes('duplicate') || orgError.code === '23505') {
-      throw new Error('That workspace name is already taken. Try another.');
-    }
-    throw orgError;
-  }
+  if (orgError) throw orgError;
 
-  // 3. NOW sign in — this fires SIGNED_IN event AFTER workspace is created
-  // By this point RegisterScreen has already navigated away
+  // 3. Sign in — fires SIGNED_IN AFTER workspace is created
+  // RegisterScreen has already navigated away by this point
   const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
     email:   email.trim().toLowerCase(),
     password,
@@ -94,73 +87,28 @@ export const createWorkspace = async (userId, orgName) => {
     .replace(/\s+/g, '-')
     .replace(/[^a-z0-9-]/g, '');
 
-  // Find a unique slug — try base, then base-2, base-3 etc.
-  let slug = baseSlug;
-  let slugAttempt = 1;
-  while (true) {
-    const { data: existing } = await supabase
-      .from('organisations')
-      .select('id')
-      .eq('slug', slug)
-      .maybeSingle();
-    if (!existing) break;
-    slugAttempt++;
-    slug = baseSlug + '-' + slugAttempt;
-  }
-
-  // Clean up old abandoned org if exists
-  const { data: oldMembership } = await supabase
-    .from('memberships')
-    .select('org_id')
-    .eq('user_id', userId)
-    .in('status', ['inactive', 'removed'])
-    .maybeSingle();
-
-  if (oldMembership?.org_id) {
-    const oldOrgId = oldMembership.org_id;
-    const { data: otherMembers } = await supabase
-      .from('memberships')
-      .select('id')
-      .eq('org_id', oldOrgId)
-      .neq('user_id', userId)
-      .in('status', ['active', 'invited'])
-      .limit(1);
-
-    if (!otherMembers?.length) {
-      const { data: depts } = await supabase
-        .from('departments').select('id').eq('org_id', oldOrgId);
-      const deptIds = (depts || []).map(d => d.id);
-      if (deptIds.length > 0) {
-        const r1 = await supabase.from('department_members').delete().in('department_id', deptIds);
-      }
-      const r2 = await supabase.from('departments').delete().eq('org_id', oldOrgId);
-      const r3 = await supabase.from('memberships').delete().eq('org_id', oldOrgId);
-      const r4 = await supabase.from('organisations').delete().eq('id', oldOrgId);
-    }
-  }
-
-  // Create new org atomically
+  // ✅ DB function handles cleanup + slug uniqueness + creation atomically
   const { data: org, error } = await supabase.rpc('create_workspace', {
     org_name:  orgName.trim(),
-    org_slug:  slug,
+    org_slug:  baseSlug, // DB function finds unique slug internally
     p_user_id: userId,
   });
-
   if (error) throw error;
 
   return org;
 };
 
 // ── Logout ────────────────────────────────────────────────────────────────────
+// Scenario 1 — plain logout, touch nothing in DB
 
 export const logout = async () => {
-  // Scenario 1 — plain logout, touch nothing
   await supabase.auth.signOut();
 };
 
 // ── Leave workspace ───────────────────────────────────────────────────────────
+// Scenario 2 — mark inactive, keep org + data
+// Caller must call clearOnboarding() + logout() after
 
-// auth.service.js
 export const leaveWorkspace = async (userId, orgId) => {
   const { data: orgDepts } = await supabase
     .from('departments')
@@ -179,33 +127,27 @@ export const leaveWorkspace = async (userId, orgId) => {
     .update({ status: 'inactive' })
     .eq('user_id', userId)
     .eq('org_id', orgId);
-
-  // ✅ NO signOut here — let the caller handle it
 };
 
-// - delete workspace  ───────────────────────────────────────────────────
+// ── Delete workspace ──────────────────────────────────────────────────────────
+// Scenario 3 — delete everything except auth + profile
+// Caller must call clearOnboarding() before calling this
 
-export const deleteWorkspace = async (userId, orgId) => {
-  // Scenario 3 — nuke the org, keep auth + profile
-  const { data: orgDepts } = await supabase
-    .from('departments')
-    .select('id')
-    .eq('org_id', orgId);
+export const deleteWorkspace = async (orgId) => {
+  const { data: depts } = await supabase
+    .from('departments').select('id').eq('org_id', orgId);
+  const deptIds = (depts || []).map(d => d.id);
 
-  const deptIds = (orgDepts || []).map(d => d.id);
   if (deptIds.length > 0) {
     await supabase.from('department_members').delete().in('department_id', deptIds);
-    await supabase.from('departments').delete().eq('org_id', orgId);
   }
-
-  await supabase.from('memberships').delete().eq('org_id', orgId);
+  await supabase.from('departments').delete().eq('org_id', orgId);
   await supabase.from('organisations').delete().eq('id', orgId);
+  // Delete memberships last — after this get_my_org_id() returns null
+  await supabase.from('memberships').delete().eq('org_id', orgId);
 
-  // ✅ Sign out after — same flow as leave workspace
   await supabase.auth.signOut();
 };
-
-
 
 // ── Change password ───────────────────────────────────────────────────────────
 

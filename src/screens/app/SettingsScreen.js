@@ -1,5 +1,5 @@
 // src/screens/app/SettingsScreen.js
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
   StyleSheet,  Modal, Pressable,
@@ -10,7 +10,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { useApp } from '../../context/AppContext';
 import { updateOrgName, updateTimezone, regenerateInviteToken, buildInviteLink } from '../../services/org.service';
-import { logout, clearOnboarding } from '../../services/auth.service';
+import { POST_TYPES } from '../../services/post.service';
+import { logout, clearOnboarding, deleteWorkspace } from '../../services/auth.service';
 import { supabase } from '../../lib/supabase';
 
 const TIMEZONES = [
@@ -146,7 +147,10 @@ function ExpiryPicker({ value, onChange }) {
 
 export default function SettingsScreen({ navigation }) {
   // ✅ All org data from AppContext — no Supabase call needed
-  const { org, orgId, orgName, isAdmin, updateOrg, user } = useApp();
+  const { org, orgId, orgName, isAdmin, updateOrg, user, activePostTypes, setActivePostTypes } = useApp();
+  // ✅ Local ref holds post types to avoid stale closure + realtime collision
+  const postTypesRef = useRef(activePostTypes);
+  useEffect(() => { postTypesRef.current = activePostTypes; }, [activePostTypes]);
 
   const [orgNameEdit,   setOrgNameEdit]   = useState(false);
   const [orgNameDraft,  setOrgNameDraft]  = useState('');
@@ -273,22 +277,8 @@ export default function SettingsScreen({ navigation }) {
         return;
       }
 
-      // Delete in correct order — org and dept cleanup BEFORE membership
-      // (once membership is deleted, get_my_org_id() returns null and RLS blocks everything)
-      const { data: depts } = await supabase
-        .from('departments').select('id').eq('org_id', orgId);
-      const deptIds = (depts || []).map(d => d.id);
-      if (deptIds.length > 0) {
-        await supabase.from('department_members').delete().in('department_id', deptIds);
-      }
-      await supabase.from('departments').delete().eq('org_id', orgId);
-      await supabase.from('organisations').delete().eq('id', orgId);
-      // Delete membership last — after this get_my_org_id() returns null
-      await supabase.from('memberships').delete().eq('org_id', orgId);
-
-      // Clear onboarding flag so new workspace shows Onboarding
       await clearOnboarding();
-      await logout();
+      await deleteWorkspace(orgId); // deletes everything + signs out
 
     } catch (err) {
       showToast('Failed to delete workspace. Please try again.');
@@ -347,20 +337,24 @@ export default function SettingsScreen({ navigation }) {
           </SettingsRow>
 
           <SettingsRow icon="✎" label="Organisation name" description="Shown to all members">
-            {orgNameEdit ? (
-              <View style={styles.inlineEditRow}>
-                <TextInput style={styles.inlineInput} value={orgNameDraft} onChangeText={setOrgNameDraft} onSubmitEditing={saveOrgName} autoFocus returnKeyType="done" />
-                <TouchableOpacity style={styles.inlineSave} onPress={saveOrgName} activeOpacity={0.85}>
-                  <Text style={styles.inlineSaveText}>Save</Text>
+            {isAdmin ? (
+              orgNameEdit ? (
+                <View style={styles.inlineEditRow}>
+                  <TextInput style={styles.inlineInput} value={orgNameDraft} onChangeText={setOrgNameDraft} onSubmitEditing={saveOrgName} autoFocus returnKeyType="done" />
+                  <TouchableOpacity style={styles.inlineSave} onPress={saveOrgName} activeOpacity={0.85}>
+                    <Text style={styles.inlineSaveText}>Save</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.inlineCancel} onPress={() => setOrgNameEdit(false)} activeOpacity={0.8}>
+                    <Text style={styles.inlineCancelText}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <TouchableOpacity style={styles.editBtn} onPress={() => { setOrgNameDraft(orgName); setOrgNameEdit(true); }} activeOpacity={0.8}>
+                  <Text style={styles.editBtnText}>Edit</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.inlineCancel} onPress={() => setOrgNameEdit(false)} activeOpacity={0.8}>
-                  <Text style={styles.inlineCancelText}>✕</Text>
-                </TouchableOpacity>
-              </View>
+              )
             ) : (
-              <TouchableOpacity style={styles.editBtn} onPress={() => { setOrgNameDraft(orgName); setOrgNameEdit(true); }} activeOpacity={0.8}>
-                <Text style={styles.editBtnText}>Edit</Text>
-              </TouchableOpacity>
+              <Text style={{ fontSize: 13, color: colors.subtle }}>{orgName}</Text>
             )}
           </SettingsRow>
 
@@ -382,25 +376,30 @@ export default function SettingsScreen({ navigation }) {
               </TouchableOpacity>
             </View>
 
-            <View style={styles.expiryRow}>
-              <View style={styles.expiryInfo}>
-                <Text style={styles.expiryLabel}>Link expiry</Text>
-                <Text style={styles.expiryDesc}>Link stops working after this period</Text>
-              </View>
-              <ExpiryPicker value={linkExpiry} onChange={(v) => { setLinkExpiry(v); showToast('Expiry updated'); }} />
-            </View>
-
+            {/* Share — everyone can share the link */}
             <TouchableOpacity style={[styles.regenerateBtn, { marginBottom: spacing.sm, borderColor: colors.brand }]} onPress={handleShare} activeOpacity={0.8}>
               <Text style={[styles.regenerateBtnText, { color: colors.brand }]}>Share invite link</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.regenerateBtn}
-              onPress={() => setConfirmModal({ title: 'Regenerate invite link?', body: "The current link will stop working immediately. Anyone who hasn't joined yet will need the new link.", confirmLabel: 'Regenerate', danger: false, onConfirm: handleRegenerateLink })}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.regenerateBtnText}>↻  Regenerate link</Text>
-            </TouchableOpacity>
+            {/* Expiry + Regenerate — admin only */}
+            {isAdmin && (
+              <>
+                <View style={styles.expiryRow}>
+                  <View style={styles.expiryInfo}>
+                    <Text style={styles.expiryLabel}>Link expiry</Text>
+                    <Text style={styles.expiryDesc}>Link stops working after this period</Text>
+                  </View>
+                  <ExpiryPicker value={linkExpiry} onChange={(v) => { setLinkExpiry(v); showToast('Expiry updated'); }} />
+                </View>
+                <TouchableOpacity
+                  style={styles.regenerateBtn}
+                  onPress={() => setConfirmModal({ title: 'Regenerate invite link?', body: "The current link will stop working immediately. Anyone who hasn't joined yet will need the new link.", confirmLabel: 'Regenerate', danger: false, onConfirm: handleRegenerateLink })}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.regenerateBtnText}>↻  Regenerate link</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </Section>
 
@@ -416,6 +415,45 @@ export default function SettingsScreen({ navigation }) {
             </SettingsRow>
           ))}
         </Section>
+
+        {/* Post types — admin only */}
+        {isAdmin && (
+          <Section title="Post types" description="Choose which post types your team can use.">
+            {POST_TYPES.map((pt, i) => {
+              const isActive = !activePostTypes || activePostTypes.includes(pt.id);
+              return (
+                <SettingsRow
+                  key={pt.id}
+                  label={pt.label}
+                  last={i === POST_TYPES.length - 1}
+                >
+                  <Switch
+                    value={isActive}
+                    onValueChange={async (val) => {
+                      const current = postTypesRef.current || POST_TYPES.map(t => t.id);
+                      const updated = val
+                        ? [...new Set([...current, pt.id])]
+                        : current.filter(id => id !== pt.id);
+                      // ✅ 1. Update ref immediately — no stale closure on rapid toggles
+                      postTypesRef.current = updated;
+                      // ✅ 2. Update AppContext state — instant UI
+                      setActivePostTypes(updated);
+                      // ✅ 3. Update AsyncStorage cache — survives r reload
+                      await AsyncStorage.setItem('notifiqe_post_types', JSON.stringify(updated));
+                      // ✅ 4. Save to DB
+                      await supabase
+                        .from('org_settings')
+                        .upsert({ org_id: orgId, active_post_types: updated }, { onConflict: 'org_id' });
+                      showToast('Post types saved');
+                    }}
+                    trackColor={{ false: colors.border, true: colors.brand }}
+                    thumbColor={colors.white}
+                  />
+                </SettingsRow>
+              );
+            })}
+          </Section>
+        )}
 
         {/* Danger zone — admin only */}
         {isAdmin && (
