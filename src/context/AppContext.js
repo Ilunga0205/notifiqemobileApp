@@ -53,15 +53,16 @@ export function AppProvider({ children }) {
     if (session?.user) setUser(session.user);
     console.log('AppContext load() called with userId:', userId);
 
-    // Show cached data immediately
-    const [cachedProfile, cachedOrg, cachedPostTypes] = await Promise.all([
+    // Show cached data — clear stale org cache first
+    await AsyncStorage.removeItem(CACHE.org); // always use fresh org
+    const [cachedProfile, cachedPostTypes] = await Promise.all([
       AsyncStorage.getItem(CACHE.profile),
-      AsyncStorage.getItem(CACHE.org),
       AsyncStorage.getItem(CACHE.postTypes),
     ]);
-    if (cachedProfile)   setProfile(JSON.parse(cachedProfile));
-    if (cachedOrg)       setOrg(JSON.parse(cachedOrg));
+    const cachedOrg = null; // never use cached org
+    if (cachedProfile) setProfile(JSON.parse(cachedProfile));
     if (cachedPostTypes) setActivePostTypes(JSON.parse(cachedPostTypes));
+    // Note: intentionally NOT restoring cached org — orgId must be fresh and correct
 
     // Fetch fresh data in background
     try {
@@ -99,7 +100,7 @@ export function AppProvider({ children }) {
           .select('active_post_types')
           .eq('org_id', freshOrg.id)
           .maybeSingle();
-        const types = settings?.active_post_types || ['announcement','leave_notice','project_update','quick_question','team_win','general_update'];
+        const types = settings?.active_post_types || ['announcement','task','project_update','quick_question','team_win','general_update'];
         setActivePostTypes(types);
         await AsyncStorage.setItem(CACHE.postTypes, JSON.stringify(types));
       }

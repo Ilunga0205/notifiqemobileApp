@@ -8,6 +8,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { useApp } from '../../context/AppContext';
+import { SkeletonMembers } from '../../components/Skeleton';
 import { supabase } from '../../lib/supabase';
 import {
   getMembers, getPendingRequests, getDepartments,
@@ -60,8 +61,9 @@ function PendingRow({ member, onApprove, onDecline }) {
 
 // ── Member row ────────────────────────────────────────────────────────────────
 
-function MemberRow({ member, onPress }) {
+function MemberRow({ member, onPress, currentUserId }) {
   const isOnLeave = member.status === 'leave';
+  const isSelf    = member.user_id === currentUserId;
   return (
     <TouchableOpacity style={styles.memberRow} onPress={onPress} activeOpacity={0.8}>
       <View style={styles.memberAvatarWrap}>
@@ -71,6 +73,11 @@ function MemberRow({ member, onPress }) {
       <View style={styles.memberInfo}>
         <View style={styles.memberNameRow}>
           <Text style={styles.memberName}>{member.full_name}</Text>
+          {isSelf && (
+            <View style={styles.youBadge}>
+              <Text style={styles.youBadgeText}>You</Text>
+            </View>
+          )}
           {member.role === 'admin' && <View style={styles.adminBadge}><Text style={styles.adminBadgeText}>Admin</Text></View>}
           {isOnLeave && <View style={styles.leaveBadge}><Text style={styles.leaveBadgeText}>On leave</Text></View>}
           {member.status === 'invited' && <View style={styles.invitedBadge}><Text style={styles.invitedBadgeText}>Invited</Text></View>}
@@ -483,34 +490,7 @@ export default function MembersScreen() {
 
   // ── Loading skeleton ──────────────────────────────────────────────────────
 
-  if (loading) return (
-    <View style={[styles.root, { backgroundColor: '#F3F4F6' }]}>
-      {Platform.OS === 'ios' ? (
-        <SafeAreaView edges={['top']} style={{ backgroundColor: colors.white }}>
-          <View style={[styles.appHeader, { borderBottomWidth: 1, borderBottomColor: colors.borderLight }]}>
-            <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
-          </View>
-        </SafeAreaView>
-      ) : (
-        <View style={styles.headerBlock}>
-          <View style={styles.appHeader}>
-            <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
-          </View>
-        </View>
-      )}
-      <View style={{ padding: spacing.page, gap: spacing.md }}>
-        {[1,2,3].map(i => (
-          <View key={i} style={[styles.memberRow, { opacity: 0.4 }]}>
-            <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: colors.borderLight }} />
-            <View style={{ flex: 1, gap: 6 }}>
-              <View style={{ width: '60%', height: 12, borderRadius: 6, backgroundColor: colors.borderLight }} />
-              <View style={{ width: '40%', height: 10, borderRadius: 5, backgroundColor: colors.borderLight }} />
-            </View>
-          </View>
-        ))}
-      </View>
-    </View>
-  );
+  if (loading && members.length === 0) return <SkeletonMembers />;
 
   return (
     <View style={styles.root}>
@@ -632,7 +612,7 @@ export default function MembersScreen() {
           <View style={styles.memberSection}>
             <Text style={styles.sectionHeader}>ADMINS · {admins.length}</Text>
             <View style={styles.memberList}>
-              {admins.map(m => <MemberRow key={m.user_id} member={m} onPress={() => setSelectedMember(m)} />)}
+              {admins.map(m => <MemberRow key={m.user_id} member={m} currentUserId={user?.id} onPress={() => setSelectedMember(m)} />)}
             </View>
           </View>
         )}
@@ -642,7 +622,7 @@ export default function MembersScreen() {
           <View style={styles.memberSection}>
             <Text style={styles.sectionHeader}>MEMBERS · {regular.length}</Text>
             <View style={styles.memberList}>
-              {regular.map(m => <MemberRow key={m.user_id} member={m} onPress={() => setSelectedMember(m)} />)}
+              {regular.map(m => <MemberRow key={m.user_id} member={m} currentUserId={user?.id} onPress={() => setSelectedMember(m)} />)}
             </View>
           </View>
         )}
@@ -770,6 +750,8 @@ const styles = StyleSheet.create({
   leaveRing:              { position: 'absolute', top: -3, left: -3, right: -3, bottom: -3, borderRadius: 100, borderWidth: 2, borderColor: '#FDE68A', borderStyle: 'dashed' },
   memberInfo:             { flex: 1, minWidth: 0 },
   memberNameRow:          { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' },
+  youBadge:               { backgroundColor: colors.brand + '15', borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, borderWidth: 1, borderColor: colors.brand + '30' },
+  youBadgeText:           { fontSize: 10, fontWeight: typography.bold, color: colors.brand, letterSpacing: 0.3 },
   memberName:             { fontSize: 15, fontWeight: typography.bold, color: colors.black },
   adminBadge:             { backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
   adminBadgeText:         { fontSize: 10, fontWeight: typography.bold, color: colors.brand },

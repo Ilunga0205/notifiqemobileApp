@@ -8,7 +8,9 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { useApp } from '../../context/AppContext';
+import { SkeletonFeed } from '../../components/Skeleton';
 import { supabase } from '../../lib/supabase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   POST_TYPES, getPostType,
   getPosts, createPost, pinPost, unpinPost, deletePost,
@@ -16,6 +18,7 @@ import {
   getOnLeaveToday,
 } from '../../services/post.service';
 import { getDepartments } from '../../services/member.service';
+import PostCard from '../../components/PostCard';
 
 const REACTION_OPTIONS = ['👍','🎉','❤️','👀','✅','🙌','🔥'];
 
@@ -25,7 +28,7 @@ const AUTO_ARCHIVE_HOURS = {
   quick_question:  7 * 24,
   team_win:       30 * 24,
   general_update: 14 * 24,
-  leave_notice:    3 * 24,
+  task:            7 * 24, // tasks stay in feed for 7 days
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -54,245 +57,68 @@ function BellIcon({ color = '#6B7280', size = 17 }) {
   );
 }
 
-function renderContent(text) {
-  const parts = text.split(/(@[\w][\w\s]*\w)/g);
-  return (
-    <Text style={styles.postContent}>
-      {parts.map((part, i) =>
-        part.startsWith('@')
-          ? <Text key={i} style={styles.mention}>{part}</Text>
-          : part
-      )}
-    </Text>
-  );
-}
+
 
 // ── Ack Bar ───────────────────────────────────────────────────────────────────
 
-function AckBar({ post, isAdmin, deptMembers, onAcknowledge, typeColor }) {
-  const allAcked = post.ackCount >= (deptMembers?.length || 1);
-  const pct = Math.min(100, Math.round((post.ackCount / (deptMembers?.length || 1)) * 100));
-
-  const pendingNames = isAdmin
-    ? (deptMembers || [])
-        .filter(m => !post.post_acknowledgements?.some?.(a => a.user_id === m.user_id) &&
-                     post.ackCount < (deptMembers?.length || 1))
-        .map(m => m.profiles?.full_name)
-        .filter(Boolean)
-        .slice(0, 3)
-    : [];
-
-  return (
-    <View style={[styles.ackBar, allAcked && styles.ackBarDone]}>
-      <View style={styles.ackBarRow}>
-        <View style={styles.ackLeft}>
-          <View style={styles.ackTrack}>
-            <View style={[styles.ackFill, { width: `${pct}%`, backgroundColor: allAcked ? '#10B981' : typeColor }]} />
-          </View>
-          <Text style={[styles.ackLabel, allAcked && { color: '#065F46' }]}>
-            {allAcked ? 'Everyone confirmed' : `${post.ackCount} of ${deptMembers?.length || '?'} confirmed`}
-          </Text>
-        </View>
-        {!post.userHasAcked ? (
-          <TouchableOpacity style={[styles.ackBtn, { backgroundColor: typeColor }]} onPress={onAcknowledge} activeOpacity={0.85}>
-            <Text style={styles.ackBtnText}>✓  Confirm</Text>
-          </TouchableOpacity>
-        ) : (
-          <Text style={styles.ackDoneText}>✓  Confirmed</Text>
-        )}
-      </View>
-      {isAdmin && pendingNames.length > 0 && (
-        <Text style={styles.ackPending}>Waiting on: {pendingNames.join(', ')}</Text>
-      )}
-    </View>
-  );
-}
-
-// ── Post Card ─────────────────────────────────────────────────────────────────
-
-function PostCard({ post, isAdmin, userId, deptMembers, activeDeptId, onAcknowledge, onPin, onUnpin, onDelete, onReact, onComment, onPress }) {
-  const [showPicker,   setShowPicker]   = useState(false);
-  const [showComments, setShowComments] = useState(false);
-  const [showMenu,     setShowMenu]     = useState(false);
-  const [comment,      setComment]      = useState('');
-  const [posting,      setPosting]      = useState(false);
-
-  const typeInfo = getPostType(post.type);
-
-  const handleReact = (emoji) => {
-    onReact(post.id, emoji);
-    setShowPicker(false);
-  };
-
-  const handleComment = async () => {
-    if (!comment.trim() || posting) return;
-    setPosting(true);
-    try {
-      await onComment(post.id, comment.trim());
-      setComment('');
-    } finally {
-      setPosting(false);
-    }
-  };
-
-  return (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.97} style={styles.card}>
-
-      {/* Type strip */}
-      <View style={[styles.cardTypeStrip, { backgroundColor: typeInfo?.bg }]}>
-        <View style={[styles.cardTypeDot, { backgroundColor: typeInfo?.color }]} />
-        <Text style={[styles.cardTypeLabel, { color: typeInfo?.color }]}>
-          {typeInfo?.label?.toUpperCase()}
-        </Text>
-        {post.pinned && (
-          <View style={styles.pinnedChip}>
-            <Text style={[styles.pinnedChipText, { color: typeInfo?.color }]}>Pinned</Text>
-          </View>
-        )}
-        {post.department?.name && post.department.name.toLowerCase() !== 'general' && activeDeptId === 'all' && (
-          <View style={styles.deptChip}>
-            <Text style={styles.deptChipText}>{post.department.name}</Text>
-          </View>
-        )}
-        {isAdmin && (
-          <View style={styles.menuWrap}>
-            <TouchableOpacity onPress={() => setShowMenu(p => !p)} style={styles.moreBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={[styles.moreBtnText, { color: typeInfo?.color + '99' }]}>•••</Text>
-            </TouchableOpacity>
-            {showMenu && (
-              <View style={styles.menuDropdown}>
-                <TouchableOpacity style={styles.menuItem} onPress={() => { post.pinned ? onUnpin(post.id) : onPin(post.id); setShowMenu(false); }}>
-                  <Text style={styles.menuItemText}>{post.pinned ? 'Unpin' : 'Pin to top'}</Text>
-                </TouchableOpacity>
-                <View style={styles.menuDivider} />
-                <TouchableOpacity style={styles.menuItem} onPress={() => { onDelete(post.id); setShowMenu(false); }}>
-                  <Text style={[styles.menuItemText, { color: '#DC2626' }]}>Delete</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
-        )}
-      </View>
-
-      {/* Body */}
-      <View style={styles.cardBody}>
-        <View style={styles.cardAuthorRow}>
-          <Avatar initials={post.authorInitials} size={28} color={post.authorColor} />
-          <Text style={styles.cardAuthor}>{post.author}</Text>
-          <Text style={styles.cardTime}>
-            {post.postedAt.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-          </Text>
-        </View>
-
-        <View style={styles.cardContentWrap}>
-          {renderContent(post.content)}
-        </View>
-
-        {/* Reactions */}
-        {Object.keys(post.reactions || {}).length > 0 && (
-          <View style={styles.reactions}>
-            {Object.entries(post.reactions).map(([emoji, count]) => (
-              <TouchableOpacity
-                key={emoji}
-                style={[styles.reactionChip, post.userReactions?.includes(emoji) && { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' }]}
-                onPress={() => handleReact(emoji)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.reactionText}>{emoji} {count}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-
-        {/* Ack bar */}
-        {post.requiresAck && (
-          <AckBar
-            post={post}
-            isAdmin={isAdmin}
-            deptMembers={deptMembers}
-            onAcknowledge={() => onAcknowledge(post.id)}
-            typeColor={typeInfo?.color}
-          />
-        )}
-
-        {/* Actions */}
-        <View style={styles.cardActions}>
-          <TouchableOpacity style={styles.actionBtn} onPress={() => setShowPicker(p => !p)} activeOpacity={0.7}>
-            <Text style={styles.actionText}>React</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.actionBtn} onPress={() => setShowComments(p => !p)} activeOpacity={0.7}>
-            <Text style={styles.actionText}>
-              {post.commentCount > 0 ? `${post.commentCount} ${post.commentCount === 1 ? 'reply' : 'replies'}` : 'Reply'}
-            </Text>
-          </TouchableOpacity>
-          {isAdmin && (
-            <Text style={styles.seenText}>Seen {post.seenCount}/{deptMembers?.length || '?'}</Text>
-          )}
-        </View>
-
-        {/* Reaction picker */}
-        {showPicker && (
-          <View style={styles.reactionPicker}>
-            {REACTION_OPTIONS.map(e => (
-              <TouchableOpacity key={e} onPress={() => handleReact(e)} style={styles.reactionPickerBtn} activeOpacity={0.7}>
-                <Text style={styles.reactionPickerEmoji}>{e}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-
-        {/* Comments */}
-        {showComments && (
-          <View style={styles.commentsWrap}>
-            {(post.comments || []).map((c, i) => (
-              <View key={c.id || i} style={styles.commentRow}>
-                <Avatar
-                  initials={c.author?.avatar_initials || (c.author?.full_name || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2)}
-                  size={24}
-                  color={c.author?.avatar_color}
-                />
-                <View style={styles.commentBubble}>
-                  <Text style={styles.commentMeta}>{c.author?.full_name || 'Unknown'} · {new Date(c.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</Text>
-                  <Text style={styles.commentText}>{c.content}</Text>
-                </View>
-              </View>
-            ))}
-            <View style={styles.commentInputRow}>
-              <TextInput
-                style={styles.commentInput}
-                placeholder="Reply..."
-                placeholderTextColor={colors.placeholder}
-                value={comment}
-                onChangeText={setComment}
-                onSubmitEditing={handleComment}
-                returnKeyType="send"
-              />
-              {comment.trim() ? (
-                <TouchableOpacity style={styles.commentSendBtn} onPress={handleComment} activeOpacity={0.85} disabled={posting}>
-                  <Text style={styles.commentSendText}>{posting ? '...' : 'Send'}</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-          </View>
-        )}
-      </View>
-    </TouchableOpacity>
-  );
-}
-
 // ── Post Modal ────────────────────────────────────────────────────────────────
 
-function PostModal({ visible, onClose, onPost, departments, defaultDeptId, activePostTypes }) {
+function PostModal({ visible, onClose, onPost, departments, defaultDeptId, activePostTypes, orgId, currentUserId }) {
   const [step,        setStep]        = useState(0);
   const [selectedType, setSelectedType] = useState(null);
   const [content,     setContent]     = useState('');
   const [deptId,      setDeptId]      = useState(defaultDeptId || null);
   const [requiresAck, setRequiresAck] = useState(false);
   const [posting,     setPosting]     = useState(false);
+  const [members,     setMembers]     = useState([]);
+  const [showMention, setShowMention] = useState(false);
+  const [mentionQuery,setMentionQuery]= useState('');
+
+  // Load org members for @mention
+  useEffect(() => {
+    if (!orgId || !visible) return;
+    supabase
+      .from('memberships')
+      .select('user_id, profiles(full_name, avatar_color, avatar_initials)')
+      .eq('org_id', orgId)
+      .eq('status', 'active')
+      .then(({ data }) => {
+        setMembers((data || []).filter(m => m.user_id !== currentUserId));
+      });
+  }, [orgId, visible, currentUserId]);
+
+  const handleContentChange = (val) => {
+    setContent(val);
+    const atIndex = val.lastIndexOf('@');
+    if (atIndex !== -1) {
+      const after = val.slice(atIndex + 1);
+      if (!after.includes(' ')) {
+        setMentionQuery(after.toLowerCase());
+        setShowMention(true);
+        return;
+      }
+    }
+    setShowMention(false);
+    setMentionQuery('');
+  };
+
+  const pickMember = (member) => {
+    const name    = member.profiles?.full_name || '';
+    const atIndex = content.lastIndexOf('@');
+    setContent(content.slice(0, atIndex) + `@${name} `);
+    setShowMention(false);
+    setMentionQuery('');
+  };
+
+  const filteredMembers = mentionQuery.length === 0
+    ? members
+    : members.filter(m => m.profiles?.full_name?.toLowerCase().includes(mentionQuery));
 
   const typeInfo       = POST_TYPES.find(p => p.id === selectedType);
   const isAnnouncement = selectedType === 'announcement';
+  const isTask         = selectedType === 'task';
   const deptInfo       = departments.find(d => d.id === deptId);
+  const hasMention     = content.includes('@');
 
   useEffect(() => {
     if (visible) {
@@ -301,14 +127,29 @@ function PostModal({ visible, onClose, onPost, departments, defaultDeptId, activ
       setContent('');
       setDeptId(defaultDeptId || departments[0]?.id || null);
       setRequiresAck(false);
+      setShowMention(false);
+      setMentionQuery('');
     }
   }, [visible]);
 
   const handlePost = async () => {
+    console.log('[PostModal] handlePost called, type:', selectedType, 'content:', content.slice(0,30), 'deptId:', deptId, 'members:', members.length);
     if (!content.trim() || !selectedType || !deptId || posting) return;
+    // Task requires @ symbol in content
+    if (isTask && !content.includes('@')) {
+      console.warn('[PostModal] Task blocked — no @ mention');
+      return;
+    }
     setPosting(true);
     try {
-      await onPost({ type: selectedType, content, departmentId: deptId, requiresAck: isAnnouncement && requiresAck });
+      // Extract @mentions from post body — resolve to user IDs
+      const mentionedIds = members
+        .filter(m => {
+          const name = m.profiles?.full_name || '';
+          return name.length > 0 && content.includes(`@${name}`);
+        })
+        .map(m => m.user_id);
+      await onPost({ type: selectedType, content, departmentId: deptId, requiresAck: isAnnouncement && requiresAck, mentionedIds });
       onClose();
     } catch (err) {
       console.warn('Post error:', err.message);
@@ -388,12 +229,42 @@ function PostModal({ visible, onClose, onPost, departments, defaultDeptId, activ
                   <Text style={{ fontSize: 12, color: typeInfo?.color + '99' }}>→ {deptInfo?.name}</Text>
                 </View>
 
+                {/* @mention list */}
+                {showMention && (
+                  <View style={styles.mentionBox}>
+                    <Text style={styles.mentionBoxHeader}>Mention a teammate</Text>
+                    {filteredMembers.map(m => {
+                      const name     = m.profiles?.full_name || '';
+                      const initials = m.profiles?.avatar_initials ||
+                        name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2);
+                      const color    = m.profiles?.avatar_color || colors.brand;
+                      return (
+                        <TouchableOpacity
+                          key={m.user_id}
+                          style={styles.mentionRow}
+                          onPress={() => pickMember(m)}
+                          activeOpacity={0.7}
+                        >
+                          <View style={[styles.mentionAvatar, { backgroundColor: color + '20', borderColor: color + '40' }]}>
+                            <Text style={[styles.mentionAvatarText, { color }]}>{initials}</Text>
+                          </View>
+                          <Text style={styles.mentionName}>{name}</Text>
+                          <Text style={styles.mentionAt}>@</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                    {filteredMembers.length === 0 && (
+                      <Text style={styles.mentionEmpty}>No match for "{mentionQuery}"</Text>
+                    )}
+                  </View>
+                )}
+
                 <TextInput
                   style={styles.modalTextarea}
-                  placeholder="Share your update..."
+                  placeholder="Share your update... (type @ to mention someone)"
                   placeholderTextColor={colors.placeholder}
                   value={content}
-                  onChangeText={setContent}
+                  onChangeText={handleContentChange}
                   multiline
                   autoFocus
                   maxLength={500}
@@ -416,6 +287,14 @@ function PostModal({ visible, onClose, onPost, departments, defaultDeptId, activ
                   </TouchableOpacity>
                 )}
 
+                {isTask && !hasMention && (
+                  <View style={{ backgroundColor: '#FEF3C7', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#FDE68A' }}>
+                    <Text style={{ fontSize: 12, color: '#92400E' }}>
+                      Tasks require an @mention — tag the person this task is for.
+                    </Text>
+                  </View>
+                )}
+
                 <View style={styles.modalFooter}>
                   <View style={{ flexDirection: 'row', gap: spacing.md }}>
                     <TouchableOpacity onPress={() => { setSelectedType(null); setStep(0); }}>
@@ -426,9 +305,9 @@ function PostModal({ visible, onClose, onPost, departments, defaultDeptId, activ
                     </TouchableOpacity>
                   </View>
                   <TouchableOpacity
-                    style={[styles.postBtn, { backgroundColor: content.trim() && !posting ? typeInfo?.color : colors.border }]}
+                    style={[styles.postBtn, { backgroundColor: content.trim() && !posting && !(isTask && !hasMention) ? typeInfo?.color : colors.border }]}
                     onPress={handlePost}
-                    disabled={!content.trim() || posting}
+                    disabled={!content.trim() || posting || (isTask && !hasMention)}
                     activeOpacity={0.85}
                   >
                     <Text style={styles.postBtnText}>{posting ? 'Posting...' : 'Post update'}</Text>
@@ -457,6 +336,10 @@ export default function FeedScreen({ navigation }) {
   const [showPostModal, setShowPostModal] = useState(false);
   const [showEarlier,     setShowEarlier]     = useState(false);
   const [showFilterSheet, setShowFilterSheet] = useState(false);
+  const [page,            setPage]            = useState(0);
+  const [hasMore,         setHasMore]         = useState(true);
+  const [loadingMore,     setLoadingMore]     = useState(false);
+  const PAGE_SIZE = 20;
 
   const lastVisit    = useRef(null);
   const loadDataRef  = useRef(loadData);
@@ -466,18 +349,27 @@ export default function FeedScreen({ navigation }) {
 
   // ── Load data ─────────────────────────────────────────────────────────────
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (pageNum = 0) => {
     if (!orgId || !user?.id) return;
     try {
       const [posts, depts, leave, settings] = await Promise.all([
-        getPosts(orgId, user.id),
+        getPosts(orgId, user.id, { limit: PAGE_SIZE, offset: pageNum * PAGE_SIZE }),
         getDepartments(orgId),
         getOnLeaveToday(orgId),
         // ✅ Always fetch fresh post types — don't rely on cached AppContext
         supabase.from('org_settings').select('active_post_types').eq('org_id', orgId).maybeSingle(),
       ]);
 
-      setFeed(posts);
+      if (pageNum === 0) {
+        setFeed(posts);
+        setPage(0);
+        // Cache first page for instant display on next open
+        const cacheKey = `notifiqe_feed_${orgId}`;
+        AsyncStorage.setItem(cacheKey, JSON.stringify(posts)).catch(() => {});
+      } else {
+        setFeed(prev => [...prev, ...posts]);
+      }
+      setHasMore(posts.length === PAGE_SIZE);
       setDepartments(depts);
       setOnLeave(leave);
 
@@ -497,9 +389,25 @@ export default function FeedScreen({ navigation }) {
     }
   }, [orgId, user?.id]);
 
+  // ── Load cached feed instantly, then refresh from network ────────────────
   useEffect(() => {
-    if (!orgId || !user?.id) return; // wait for AppContext to be ready
+    if (!orgId || !user?.id) return;
     lastVisit.current = new Date();
+
+    // Show cached posts immediately — < 100ms
+    const cacheKey = `notifiqe_feed_${orgId}`;
+    AsyncStorage.getItem(cacheKey).then(cached => {
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          // Restore Date objects
+          const restored = parsed.map(p => ({ ...p, postedAt: new Date(p.postedAt) }));
+          setFeed(restored);
+        } catch (e) {}
+      }
+    });
+
+    // Then load fresh from network
     loadData();
   }, [orgId, user?.id, loadData]);
 
@@ -567,8 +475,8 @@ export default function FeedScreen({ navigation }) {
     await reactToPost(postId, user.id, emoji);
   };
 
-  const handleComment = async (postId, content) => {
-    const newComment = await addComment(postId, user.id, content);
+  const handleComment = async (postId, content, mentionedIds = []) => {
+    const newComment = await addComment(postId, user.id, content, mentionedIds);
     setFeed(prev => prev.map(p => p.id !== postId ? p : {
       ...p,
       commentCount: p.commentCount + 1,
@@ -576,8 +484,17 @@ export default function FeedScreen({ navigation }) {
     }));
   };
 
-  const handlePost = async ({ type, content, departmentId, requiresAck }) => {
-    await createPost({ orgId, authorId: user.id, type, content, departmentId, requiresAck });
+  const handleLoadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    const nextPage = page + 1;
+    setPage(nextPage);
+    await loadData(nextPage);
+    setLoadingMore(false);
+  };
+
+  const handlePost = async ({ type, content, departmentId, requiresAck, mentionedIds = [] }) => {
+    await createPost({ orgId, authorId: user.id, type, content, departmentId, requiresAck, mentionedIds });
     await loadData();
   };
 
@@ -585,6 +502,7 @@ export default function FeedScreen({ navigation }) {
 
   const deptMemberMap = {};
   departments.forEach(d => { deptMemberMap[d.id] = d.department_members || []; });
+
 
   const myDepts = departments.filter(d =>
     d.department_members?.some(m => m.user_id === user?.id)
@@ -735,6 +653,15 @@ export default function FeedScreen({ navigation }) {
         <View style={styles.caughtUp}>
           <Text style={styles.caughtUpTitle}>You're all caught up</Text>
           <Text style={styles.caughtUpSub}>Nothing new in the last 48 hours.</Text>
+          <TouchableOpacity
+            onPress={() => navigation.getParent().navigate('History')}
+            activeOpacity={0.7}
+            style={{ marginTop: spacing.sm }}
+          >
+            <Text style={{ fontSize: 13, color: colors.brand, fontWeight: typography.medium }}>
+              Browse older posts →
+            </Text>
+          </TouchableOpacity>
         </View>
       );
     }
@@ -763,6 +690,7 @@ export default function FeedScreen({ navigation }) {
         post={item}
         isAdmin={isAdmin}
         userId={user?.id}
+        orgId={orgId}
         deptMembers={deptMemberMap[item.departmentId]}
         activeDeptId={activeDeptId}
         onAcknowledge={handleAcknowledge}
@@ -776,13 +704,7 @@ export default function FeedScreen({ navigation }) {
     );
   };
 
-  if (loading) {
-    return (
-      <View style={[styles.root, { alignItems: 'center', justifyContent: 'center' }]}>
-        <Text style={{ fontSize: 13, color: colors.subtle }}>Loading feed...</Text>
-      </View>
-    );
-  }
+  if (loading && feed.length === 0) return <SkeletonFeed />;
 
   return (
     <View style={styles.root}>
@@ -838,6 +760,13 @@ export default function FeedScreen({ navigation }) {
         contentContainerStyle={styles.feedList}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        onEndReached={handleLoadMore}
+        onEndReachedThreshold={0.3}
+        ListFooterComponent={loadingMore ? (
+          <View style={{ paddingVertical: 16, alignItems: 'center' }}>
+            <Text style={{ fontSize: 12, color: colors.subtle }}>Loading more...</Text>
+          </View>
+        ) : null}
       />
 
       <TouchableOpacity style={styles.fab} onPress={() => setShowPostModal(true)} activeOpacity={0.85}>
@@ -891,6 +820,8 @@ export default function FeedScreen({ navigation }) {
         departments={myDepts}
         defaultDeptId={activeDeptId !== 'all' ? activeDeptId : myDepts[0]?.id}
         activePostTypes={activePostTypes}
+        orgId={orgId}
+        currentUserId={user?.id}
       />
     </View>
   );
@@ -905,7 +836,7 @@ const styles = StyleSheet.create({
   appLogo:          { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
   appLogoAccent:    { color: colors.brand },
   appSep:           { fontSize: 14, color: colors.border },
-  appOrg:           { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
+  appOrg:           { fontSize: 13, fontWeight: typography.semibold, color: colors.brand, textDecorationLine: 'underline', textDecorationColor: colors.brand },
   bellBtn:          { position: 'relative', width: 34, height: 34, alignItems: 'center', justifyContent: 'center' },
   bellBadge:        { position: 'absolute', top: 5, right: 5, width: 7, height: 7, borderRadius: 4, backgroundColor: '#DC2626', borderWidth: 1.5, borderColor: colors.white },
   feedList:         { paddingHorizontal: spacing.page, paddingTop: spacing.md, paddingBottom: 100 },
@@ -1024,5 +955,13 @@ const styles = StyleSheet.create({
   postBtnText:      { fontSize: 14, fontWeight: typography.semibold, color: colors.white },
   filterTypeRow:    { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.borderLight, backgroundColor: colors.white },
   filterTypeRowActive: { borderColor: colors.brand + '40', backgroundColor: '#EFF6FF' },
+  mentionBox:       { backgroundColor: '#F0F9FF', borderWidth: 1.5, borderColor: '#7DD3FC', borderRadius: 10, marginBottom: 8, overflow: 'hidden' },
+  mentionBoxHeader: { fontSize: 11, color: '#0369A1', fontWeight: '600', paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#E0F2FE', borderBottomWidth: 1, borderBottomColor: '#BAE6FD' },
+  mentionRow:       { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#E0F2FE' },
+  mentionAvatar:    { width: 28, height: 28, borderRadius: 14, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
+  mentionAvatarText:{ fontSize: 10, fontWeight: '700' },
+  mentionName:      { flex: 1, fontSize: 14, fontWeight: '600', color: colors.black },
+  mentionAt:        { fontSize: 14, color: colors.brand, fontWeight: '700' },
+  mentionEmpty:     { padding: 12, fontSize: 13, color: colors.subtle, textAlign: 'center' },
   filterTypeLabel:  { flex: 1, fontSize: 14, color: colors.muted, fontWeight: typography.medium },
 });

@@ -1,134 +1,25 @@
 // src/screens/app/HistoryScreen.js
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, TextInput,
-  StyleSheet,  Modal, Pressable,
-  Platform, StatusBar, FlatList,
+  View, Text, FlatList, TouchableOpacity, TextInput,
+  StyleSheet, Platform, StatusBar,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
+import { useApp } from '../../context/AppContext';
+import { getArchivedPosts, POST_TYPES, getPostType } from '../../services/post.service';
+import { getDepartments } from '../../services/member.service';
 
-// ── DATA ──────────────────────────────────────────────────────────────────────
+const PAGE_SIZE = 30;
 
-const POST_TYPES = [
-  { id: 'announcement', label: 'Announcement',  color: '#1D4ED8', bg: '#EFF6FF' },
-  { id: 'project',      label: 'Project Update', color: '#5B21B6', bg: '#F5F3FF' },
-  { id: 'question',     label: 'Quick Question', color: '#9D174D', bg: '#FDF2F8' },
-  { id: 'win',          label: 'Team Win',        color: '#065F46', bg: '#ECFDF5' },
-  { id: 'general',      label: 'General Update',  color: '#374151', bg: '#F9FAFB' },
-];
-
-const DEPARTMENTS = [
-  { id: 'general',    label: 'General'    },
-  { id: 'management', label: 'Management' },
-  { id: 'dev',        label: 'Dev Team'   },
-  { id: 'finance',    label: 'Finance'    },
-];
-
-// Simulate archived posts — all older than active feed window
-const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
-
-const ARCHIVED_POSTS = [
-  {
-    id: 101, type: 'Announcement', color: '#1D4ED8', bg: '#EFF6FF',
-    department: 'general',
-    author: 'Sarah M.', authorInitials: 'SM', authorColor: '#1D4ED8',
-    archivedAt: hoursAgo(24 * 5),
-    content: 'Performance reviews are due by end of month. Please submit your self-assessment via the HR portal before the 31st.',
-    requiresAck: true, acknowledged: 6, totalRecipients: 6,
-    reactions: { '👍': 3 }, commentCount: 2,
-  },
-  {
-    id: 102, type: 'Team Win', color: '#065F46', bg: '#ECFDF5',
-    department: 'general',
-    author: 'Ben A.', authorInitials: 'BA', authorColor: '#0369A1',
-    archivedAt: hoursAgo(24 * 6),
-    content: 'Wrapped up the new onboarding flow. Reduced steps from 8 to 4. Great work from the dev team!',
-    requiresAck: false, acknowledged: 0, totalRecipients: 6,
-    reactions: { '🎉': 5, '👍': 3 }, commentCount: 2,
-  },
-  {
-    id: 103, type: 'General Update', color: '#374151', bg: '#F9FAFB',
-    department: 'general',
-    author: 'James K.', authorInitials: 'JK', authorColor: '#065F46',
-    archivedAt: hoursAgo(24 * 7),
-    content: 'Updated the shared drive folder structure. Everything is now under /Projects/2024. Old links should still redirect.',
-    requiresAck: false, acknowledged: 0, totalRecipients: 6,
-    reactions: { '👍': 2 }, commentCount: 0,
-  },
-  {
-    id: 104, type: 'Quick Question', color: '#9D174D', bg: '#FDF2F8',
-    department: 'dev',
-    author: 'Priya N.', authorInitials: 'PN', authorColor: '#9D174D',
-    archivedAt: hoursAgo(24 * 8),
-    content: 'Does anyone have the login credentials for the staging server? Need to test the new build before Friday.',
-    requiresAck: false, acknowledged: 0, totalRecipients: 3,
-    reactions: {}, commentCount: 3,
-  },
-  {
-    id: 105, type: 'Announcement', color: '#1D4ED8', bg: '#EFF6FF',
-    department: 'management',
-    author: 'Sarah M.', authorInitials: 'SM', authorColor: '#1D4ED8',
-    archivedAt: hoursAgo(24 * 14),
-    content: 'Q1 financials have been submitted. We came in 4% under budget — great work from everyone on managing costs this quarter.',
-    requiresAck: true, acknowledged: 2, totalRecipients: 2,
-    reactions: { '👍': 2, '🎉': 1 }, commentCount: 0,
-  },
-  {
-    id: 106, type: 'Project Update', color: '#5B21B6', bg: '#F5F3FF',
-    department: 'dev',
-    author: 'David O.', authorInitials: 'DO', authorColor: '#5B21B6',
-    archivedAt: hoursAgo(24 * 18),
-    content: 'Phase 1 of the client X migration is complete. Phase 2 starts Monday — @Priya N. please brief the team at standup.',
-    requiresAck: false, acknowledged: 0, totalRecipients: 3,
-    reactions: { '👍': 1 }, commentCount: 1,
-  },
-  {
-    id: 107, type: 'Team Win', color: '#065F46', bg: '#ECFDF5',
-    department: 'general',
-    author: 'Tom R.', authorInitials: 'TR', authorColor: '#92400E',
-    archivedAt: hoursAgo(24 * 21),
-    content: 'We hit 100 paying customers today. Took us 8 months but we got there. Thank you all.',
-    requiresAck: false, acknowledged: 0, totalRecipients: 6,
-    reactions: { '🎉': 12, '❤️': 8, '👍': 6 }, commentCount: 7,
-  },
-  {
-    id: 108, type: 'Announcement', color: '#1D4ED8', bg: '#EFF6FF',
-    department: 'general',
-    author: 'Sarah M.', authorInitials: 'SM', authorColor: '#1D4ED8',
-    archivedAt: hoursAgo(24 * 32),
-    content: 'New office hours from next month: 8am–4pm instead of 9am–5pm. This was voted on by the team. Parking will be arranged accordingly.',
-    requiresAck: true, acknowledged: 6, totalRecipients: 6,
-    reactions: { '👍': 4 }, commentCount: 3,
-  },
-  {
-    id: 109, type: 'General Update', color: '#374151', bg: '#F9FAFB',
-    department: 'finance',
-    author: 'Tom R.', authorInitials: 'TR', authorColor: '#92400E',
-    archivedAt: hoursAgo(24 * 45),
-    content: 'Expense reports for February are due by the 10th. Please use the new template on the shared drive — the old one is no longer accepted.',
-    requiresAck: false, acknowledged: 0, totalRecipients: 2,
-    reactions: {}, commentCount: 0,
-  },
-  {
-    id: 110, type: 'Project Update', color: '#5B21B6', bg: '#F5F3FF',
-    department: 'dev',
-    author: 'Ben A.', authorInitials: 'BA', authorColor: '#0369A1',
-    archivedAt: hoursAgo(24 * 60),
-    content: 'Backend API v2 is now live in production. All endpoints have been updated. Documentation has been pushed to Confluence.',
-    requiresAck: false, acknowledged: 0, totalRecipients: 3,
-    reactions: { '🎉': 3, '👍': 2 }, commentCount: 1,
-  },
-];
-
-// ── HELPERS ───────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function Avatar({ initials, size = 28, color }) {
   return (
     <View style={[styles.avatar, {
       width: size, height: size, borderRadius: size / 2,
       backgroundColor: color ? color + '18' : '#EFF6FF',
-      borderColor: color ? color + '35' : '#BFDBFE',
+      borderColor:     color ? color + '35' : '#BFDBFE',
     }]}>
       <Text style={[styles.avatarText, { fontSize: size * 0.33, color: color || colors.brand }]}>
         {initials}
@@ -137,172 +28,79 @@ function Avatar({ initials, size = 28, color }) {
   );
 }
 
-function formatDate(date) {
-  const now      = new Date();
-  const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
-  if (diffDays < 7)  return date.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' });
-  if (diffDays < 30) return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long' });
-  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+function timeAgo(date) {
+  if (!date) return '';
+  const d    = date instanceof Date ? date : new Date(date);
+  const diff = Math.floor((Date.now() - d) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  if (diff < 7)  return `${diff} days ago`;
+  if (diff < 30) return `${Math.floor(diff / 7)} week${Math.floor(diff / 7) > 1 ? 's' : ''} ago`;
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-function getDateGroup(date) {
-  const now      = new Date();
-  const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
-  if (diffDays < 7)  return 'This week';
-  if (diffDays < 30) return 'This month';
-  if (diffDays < 60) return 'Last month';
-  return 'Older';
-}
-
-function renderContent(text) {
-  const parts = text.split(/(@[\w][\w\s]*\w)/g);
+function renderContent(text, query, typeColor) {
+  // Split by @mentions first, then by search query
+  const atParts = text.split(/(@[^\s]+)/g);
   return (
-    <Text style={styles.postDetailContent}>
-      {parts.map((part, i) =>
-        part.startsWith('@')
-          ? <Text key={i} style={styles.mention}>{part}</Text>
-          : part
-      )}
+    <Text style={styles.postContent} numberOfLines={3}>
+      {atParts.map((part, i) => {
+        if (part.startsWith('@')) {
+          return <Text key={i} style={{ color: typeColor || '#2563EB', fontWeight: '600' }}>{part}</Text>;
+        }
+        if (!query.trim()) return <Text key={i} style={{ color: '#374151' }}>{part}</Text>;
+        // Highlight search within non-mention parts
+        const subParts = part.split(new RegExp(`(${query})`, 'gi'));
+        return subParts.map((sub, j) =>
+          sub.toLowerCase() === query.toLowerCase()
+            ? <Text key={`${i}-${j}`} style={styles.highlight}>{sub}</Text>
+            : <Text key={`${i}-${j}`} style={{ color: '#374151' }}>{sub}</Text>
+        );
+      })}
     </Text>
   );
 }
 
-// ── POST DETAIL SHEET ─────────────────────────────────────────────────────────
+// ── Post card (read-only, compact) ────────────────────────────────────────────
 
-function PostDetailSheet({ post, onClose }) {
-  if (!post) return null;
-  const typeInfo = POST_TYPES.find(p => p.label === post.type);
-  const dept     = DEPARTMENTS.find(d => d.id === post.department);
-  const hasReactions = Object.keys(post.reactions).length > 0;
+function HistoryCard({ post, query, onPress }) {
+  const typeInfo = getPostType(post.type);
+  const totalReactions = Object.values(post.reactions || {}).reduce((a, b) => a + b, 0);
 
   return (
-    <Modal visible={!!post} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.overlay} onPress={onClose}>
-        <Pressable style={styles.detailSheet} onPress={e => e.stopPropagation()}>
-          <View style={styles.sheetHandle} />
-
-          {/* Colored type strip */}
-          <View style={[styles.detailTypeStrip, { backgroundColor: typeInfo?.bg }]}>
-            <View style={[styles.detailTypeDot, { backgroundColor: typeInfo?.color }]} />
-            <Text style={[styles.detailTypeLabel, { color: typeInfo?.color }]}>
-              {post.type.toUpperCase()}
-            </Text>
-            {dept && dept.id !== 'general' && (
-              <View style={styles.detailDeptChip}>
-                <Text style={styles.detailDeptChipText}>{dept.label}</Text>
-              </View>
-            )}
-            <View style={styles.archiveBadge}>
-              <Text style={styles.archiveBadgeText}>Archived</Text>
-            </View>
-          </View>
-
-          <ScrollView showsVerticalScrollIndicator={false} style={styles.detailScroll}>
-            {/* Author + date */}
-            <View style={styles.detailMeta}>
-              <Avatar initials={post.authorInitials} size={32} color={post.authorColor} />
-              <View>
-                <Text style={styles.detailAuthor}>{post.author}</Text>
-                <Text style={styles.detailDate}>{formatDate(post.archivedAt)}</Text>
-              </View>
-            </View>
-
-            {/* Content */}
-            <View style={styles.detailContentWrap}>
-              {renderContent(post.content)}
-            </View>
-
-            {/* Ack info (read only) */}
-            {post.requiresAck && (
-              <View style={styles.detailAckBar}>
-                <View style={styles.detailAckTrack}>
-                  <View style={[styles.detailAckFill, {
-                    width: `${Math.round((post.acknowledged / post.totalRecipients) * 100)}%`,
-                    backgroundColor: post.acknowledged >= post.totalRecipients ? '#10B981' : typeInfo?.color,
-                  }]} />
-                </View>
-                <Text style={styles.detailAckText}>
-                  {post.acknowledged >= post.totalRecipients
-                    ? 'Everyone confirmed'
-                    : `${post.acknowledged} of ${post.totalRecipients} confirmed`}
-                </Text>
-              </View>
-            )}
-
-            {/* Reactions (read only) */}
-            {hasReactions && (
-              <View style={styles.detailReactions}>
-                {Object.entries(post.reactions).map(([emoji, count]) => (
-                  <View key={emoji} style={styles.detailReactionChip}>
-                    <Text style={styles.detailReactionText}>{emoji} {count}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-
-            {/* Stats */}
-            <View style={styles.detailStats}>
-              {post.commentCount > 0 && (
-                <Text style={styles.detailStatText}>
-                  {post.commentCount} {post.commentCount === 1 ? 'reply' : 'replies'}
-                </Text>
-              )}
-              <Text style={styles.detailStatNote}>Read only · This post has been archived</Text>
-            </View>
-
-            <View style={{ height: 32 }} />
-          </ScrollView>
-        </Pressable>
-      </Pressable>
-    </Modal>
-  );
-}
-
-// ── HISTORY ROW (compact) ─────────────────────────────────────────────────────
-
-function HistoryRow({ post, onPress }) {
-  const typeInfo = POST_TYPES.find(p => p.label === post.type);
-  const hasReactions = Object.keys(post.reactions).length > 0;
-
-  return (
-    <TouchableOpacity style={styles.historyRow} onPress={onPress} activeOpacity={0.8}>
-      {/* Left color bar */}
-      <View style={[styles.historyRowBar, { backgroundColor: typeInfo?.color }]} />
-
-      <View style={styles.historyRowContent}>
-        {/* Type + dept + time */}
-        <View style={styles.historyRowTop}>
-          <View style={[styles.historyTypeBadge, { backgroundColor: typeInfo?.bg }]}>
-            <View style={[styles.historyTypeDot, { backgroundColor: typeInfo?.color }]} />
-            <Text style={[styles.historyTypeText, { color: typeInfo?.color }]}>
-              {post.type}
-            </Text>
-          </View>
-          <Text style={styles.historyRowTime}>
-            {formatDate(post.archivedAt)}
-          </Text>
-        </View>
-
-        {/* Content preview */}
-        <Text style={styles.historyRowText} numberOfLines={2}>
-          {post.content}
+    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.85}>
+      <View style={[styles.cardStrip, { backgroundColor: typeInfo.bg }]}>
+        <View style={[styles.typeDot, { backgroundColor: typeInfo.color }]} />
+        <Text style={[styles.typeLabel, { color: typeInfo.color }]}>
+          {typeInfo.label.toUpperCase()}
         </Text>
+        {post.department?.name && post.department.name.toLowerCase() !== 'general' && (
+          <View style={styles.deptChip}>
+            <Text style={styles.deptChipText}>{post.department.name}</Text>
+          </View>
+        )}
+        <Text style={styles.timeAgo}>{timeAgo(post.postedAt)}</Text>
+      </View>
 
-        {/* Author + stats */}
-        <View style={styles.historyRowBottom}>
-          <Avatar initials={post.authorInitials} size={18} color={post.authorColor} />
-          <Text style={styles.historyRowAuthor}>{post.author}</Text>
+      <View style={styles.cardBody}>
+        <View style={styles.authorRow}>
+          <Avatar initials={post.authorInitials} size={24} color={post.authorColor} />
+          <Text style={styles.authorName}>{post.author}</Text>
+        </View>
+        {renderContent(post.content, query, typeInfo?.color)}
 
-          {hasReactions && (
-            <View style={styles.historyRowStats}>
-              {Object.entries(post.reactions).slice(0, 2).map(([emoji, count]) => (
-                <Text key={emoji} style={styles.historyRowStat}>{emoji} {count}</Text>
-              ))}
-            </View>
+        {/* Stats row */}
+        <View style={styles.statsRow}>
+          {totalReactions > 0 && (
+            <Text style={styles.statText}>{totalReactions} reaction{totalReactions > 1 ? 's' : ''}</Text>
           )}
-
           {post.commentCount > 0 && (
-            <Text style={styles.historyRowStat}>💬 {post.commentCount}</Text>
+            <Text style={styles.statText}>{post.commentCount} repl{post.commentCount > 1 ? 'ies' : 'y'}</Text>
+          )}
+          {post.requiresAck && (
+            <Text style={[styles.statText, { color: post.ackCount >= (post.totalRecipients || 1) ? '#065F46' : colors.muted }]}>
+              {post.ackCount >= (post.totalRecipients || 1) ? '✓ All confirmed' : `${post.ackCount} confirmed`}
+            </Text>
           )}
         </View>
       </View>
@@ -310,60 +108,215 @@ function HistoryRow({ post, onPress }) {
   );
 }
 
-// ── MAIN SCREEN ───────────────────────────────────────────────────────────────
+// ── Filter bar ────────────────────────────────────────────────────────────────
+
+function FilterBar({ activeType, setActiveType, activeDept, setActiveDept, departments, activePostTypes }) {
+  const [showTypes, setShowTypes] = useState(false);
+  const [showDepts, setShowDepts] = useState(false);
+
+  const activeTypeInfo = POST_TYPES.find(t => t.id === activeType);
+  const activeDeptInfo = departments.find(d => d.id === activeDept);
+
+  return (
+    <View>
+      <View style={styles.filterRow}>
+        {/* Type filter */}
+        <TouchableOpacity
+          style={[styles.filterBtn, activeType && { backgroundColor: activeTypeInfo?.bg, borderColor: activeTypeInfo?.color + '50' }]}
+          onPress={() => { setShowTypes(p => !p); setShowDepts(false); }}
+          activeOpacity={0.8}
+        >
+          {activeType && <View style={[styles.filterDot, { backgroundColor: activeTypeInfo?.color }]} />}
+          <Text style={[styles.filterBtnText, activeType && { color: activeTypeInfo?.color, fontWeight: typography.semibold }]}>
+            {activeType ? activeTypeInfo?.label : 'Type ▾'}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Dept filter */}
+        <TouchableOpacity
+          style={[styles.filterBtn, activeDept && { backgroundColor: '#EFF6FF', borderColor: '#93C5FD' }]}
+          onPress={() => { setShowDepts(p => !p); setShowTypes(false); }}
+          activeOpacity={0.8}
+        >
+          <Text style={[styles.filterBtnText, activeDept && { color: colors.brand, fontWeight: typography.semibold }]}>
+            {activeDept ? activeDeptInfo?.name : 'Dept ▾'}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Clear */}
+        {(activeType || activeDept) && (
+          <TouchableOpacity
+            style={styles.clearBtn}
+            onPress={() => { setActiveType(null); setActiveDept(null); setShowTypes(false); setShowDepts(false); }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.clearBtnText}>Clear</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {/* Type dropdown */}
+      {showTypes && (
+        <View style={styles.dropdown}>
+          <TouchableOpacity style={styles.dropdownItem} onPress={() => { setActiveType(null); setShowTypes(false); }}>
+            <Text style={[styles.dropdownText, !activeType && { color: colors.brand, fontWeight: typography.semibold }]}>All types</Text>
+          </TouchableOpacity>
+          {(activePostTypes ? POST_TYPES.filter(t => activePostTypes.includes(t.id)) : POST_TYPES).map(t => (
+            <TouchableOpacity
+              key={t.id}
+              style={styles.dropdownItem}
+              onPress={() => { setActiveType(t.id); setShowTypes(false); }}
+            >
+              <View style={[styles.filterDot, { backgroundColor: t.color }]} />
+              <Text style={[styles.dropdownText, activeType === t.id && { color: t.color, fontWeight: typography.semibold }]}>{t.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+
+      {/* Dept dropdown */}
+      {showDepts && (
+        <View style={styles.dropdown}>
+          <TouchableOpacity style={styles.dropdownItem} onPress={() => { setActiveDept(null); setShowDepts(false); }}>
+            <Text style={[styles.dropdownText, !activeDept && { color: colors.brand, fontWeight: typography.semibold }]}>All departments</Text>
+          </TouchableOpacity>
+          {departments.map(d => (
+            <TouchableOpacity
+              key={d.id}
+              style={styles.dropdownItem}
+              onPress={() => { setActiveDept(d.id); setShowDepts(false); }}
+            >
+              <Text style={[styles.dropdownText, activeDept === d.id && { color: colors.brand, fontWeight: typography.semibold }]}>{d.name}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ── Main screen ───────────────────────────────────────────────────────────────
 
 export default function HistoryScreen({ navigation }) {
-  const [search,     setSearch]     = useState('');
-  const [typeFilter, setTypeFilter] = useState('All');
-  const [deptFilter, setDeptFilter] = useState('all');
-  const [selected,   setSelected]   = useState(null);
+  const { user, orgId, orgName, activePostTypes } = useApp();
 
-  const orgName = 'Acme Corp';
+  const [posts,       setPosts]       = useState([]);
+  const [departments, setDepartments] = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore,     setHasMore]     = useState(true);
+  const [page,        setPage]        = useState(0);
+  const [query,       setQuery]       = useState('');
+  const [activeType,  setActiveType]  = useState(null);
+  const [activeDept,  setActiveDept]  = useState(null);
 
-  // Filter posts
-  const filtered = useMemo(() => {
-    return ARCHIVED_POSTS
-      .filter(p => typeFilter === 'All' || p.type === typeFilter)
-      .filter(p => deptFilter === 'all' || p.department === deptFilter)
-      .filter(p => !search || p.content.toLowerCase().includes(search.toLowerCase()) || p.author.toLowerCase().includes(search.toLowerCase()))
-      .sort((a, b) => b.archivedAt - a.archivedAt);
-  }, [search, typeFilter, deptFilter]);
+  const searchTimeout = useRef(null);
 
-  // Group by date
-  const grouped = useMemo(() => {
-    const groups = {};
-    filtered.forEach(p => {
-      const group = getDateGroup(p.archivedAt);
-      if (!groups[group]) groups[group] = [];
-      groups[group].push(p);
-    });
-    // Return in order
-    const order = ['This week', 'This month', 'Last month', 'Older'];
-    return order.filter(g => groups[g]).map(g => ({ title: g, data: groups[g] }));
-  }, [filtered]);
+  // ── Load posts ──────────────────────────────────────────────────────────
 
-  // Flatten for FlatList with section headers
-  const listItems = useMemo(() => {
-    const items = [];
-    grouped.forEach(group => {
-      items.push({ _kind: 'header', title: group.title, count: group.data.length });
-      group.data.forEach(p => items.push({ _kind: 'post', ...p }));
-    });
-    return items;
-  }, [grouped]);
+  const loadPosts = useCallback(async (pageNum = 0, searchQuery = '', typeFilter = null, deptFilter = null) => {
+    if (!orgId || !user?.id) return;
+    try {
+      // Get all posts with pagination — history shows everything
+      const all = await getArchivedPosts(orgId, user.id, {
+        limit:  PAGE_SIZE,
+        offset: pageNum * PAGE_SIZE,
+      });
 
-  const renderItem = ({ item }) => {
-    if (item._kind === 'header') {
-      return (
-        <View style={styles.groupHeader}>
-          <Text style={styles.groupHeaderText}>{item.title}</Text>
-          <View style={styles.groupHeaderLine} />
-          <Text style={styles.groupHeaderCount}>{item.count}</Text>
-        </View>
-      );
+      // Client-side filter by search + type + dept
+      let filtered = all;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        filtered = filtered.filter(p =>
+          p.content?.toLowerCase().includes(q) ||
+          p.author?.toLowerCase().includes(q) ||
+          p.department?.name?.toLowerCase().includes(q)
+        );
+      }
+      if (typeFilter)  filtered = filtered.filter(p => p.type === typeFilter);
+      if (deptFilter)  filtered = filtered.filter(p => p.departmentId === deptFilter);
+
+      if (pageNum === 0) {
+        setPosts(filtered);
+      } else {
+        setPosts(prev => [...prev, ...filtered]);
+      }
+      setHasMore(all.length === PAGE_SIZE);
+    } catch (err) {
+      console.warn('HistoryScreen loadPosts error:', err.message);
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
     }
-    return <HistoryRow post={item} onPress={() => setSelected(item)} />;
+  }, [orgId, user?.id]);
+
+  useEffect(() => {
+    if (!orgId || !user?.id) return;
+    Promise.all([
+      loadPosts(0, query, activeType, activeDept),
+      getDepartments(orgId).then(setDepartments),
+    ]);
+  }, [orgId, user?.id]);
+
+  // ── Search with debounce ────────────────────────────────────────────────
+
+  const handleSearch = (text) => {
+    setQuery(text);
+    clearTimeout(searchTimeout.current);
+    searchTimeout.current = setTimeout(() => {
+      setPage(0);
+      setLoading(true);
+      loadPosts(0, text, activeType, activeDept);
+    }, 350);
   };
+
+  // ── Filter change ───────────────────────────────────────────────────────
+
+  useEffect(() => {
+    setPage(0);
+    setLoading(true);
+    loadPosts(0, query, activeType, activeDept);
+  }, [activeType, activeDept]);
+
+  // ── Load more ───────────────────────────────────────────────────────────
+
+  const handleLoadMore = () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    const next = page + 1;
+    setPage(next);
+    loadPosts(next, query, activeType, activeDept);
+  };
+
+  // ── Render ──────────────────────────────────────────────────────────────
+
+  const renderItem = ({ item }) => (
+    <HistoryCard
+      post={item}
+      query={query}
+      onPress={() => navigation.navigate('PostDetail', { post: item })}
+    />
+  );
+
+  const renderEmpty = () => (
+    <View style={styles.emptyWrap}>
+      <Text style={styles.emptyTitle}>
+        {query ? `No results for "${query}"` : 'No archived posts yet'}
+      </Text>
+      <Text style={styles.emptySub}>
+        {query ? 'Try a different search term or clear your filters.' : 'Posts older than 48 hours will appear here.'}
+      </Text>
+      {query && (
+        <TouchableOpacity onPress={() => { setQuery(''); setActiveType(null); setActiveDept(null); }} style={styles.clearAllBtn} activeOpacity={0.8}>
+          <Text style={styles.clearAllBtnText}>Clear search</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+
+  const myDepts = departments.filter(d =>
+    d.department_members?.some(m => m.user_id === user?.id)
+  );
 
   return (
     <View style={styles.root}>
@@ -371,240 +324,134 @@ export default function HistoryScreen({ navigation }) {
 
       {/* Header */}
       {Platform.OS === 'ios' ? (
-        <SafeAreaView style={{ backgroundColor: colors.white }}>
-          <View style={styles.appHeader}>
+        <SafeAreaView edges={['top']} style={{ backgroundColor: colors.white }}>
+          <View style={[styles.appHeader, { borderBottomWidth: 1, borderBottomColor: colors.borderLight }]}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.backBtnText}>‹</Text>
             </TouchableOpacity>
-            <View style={styles.appHeaderCenter}>
-              <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
-              <Text style={styles.appSep}>/</Text>
-              <Text style={styles.appOrg}>{orgName}</Text>
-            </View>
-            <View style={styles.backBtn} />
+            <Text style={styles.headerTitle}>History</Text>
+            <View style={{ width: 36 }} />
           </View>
         </SafeAreaView>
       ) : (
-        <View style={styles.headerBlock}>
+        <View style={[styles.headerBlock, { borderBottomWidth: 1, borderBottomColor: colors.borderLight }]}>
           <View style={styles.appHeader}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.backBtnText}>‹</Text>
             </TouchableOpacity>
-            <View style={styles.appHeaderCenter}>
-              <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
-              <Text style={styles.appSep}>/</Text>
-              <Text style={styles.appOrg}>{orgName}</Text>
-            </View>
-            <View style={styles.backBtn} />
+            <Text style={styles.headerTitle}>History</Text>
+            <View style={{ width: 36 }} />
           </View>
         </View>
       )}
 
-      {/* Page title + search */}
-      <View style={styles.topSection}>
-        <View style={styles.pageTitleRow}>
-          <Text style={styles.pageTitle}>History</Text>
-          <Text style={styles.pageSub}>{filtered.length} post{filtered.length !== 1 ? 's' : ''}</Text>
-        </View>
-
-        {/* Search */}
-        <View style={styles.searchWrap}>
+      {/* Search */}
+      <View style={styles.searchWrap}>
+        <View style={styles.searchBox}>
           <Text style={styles.searchIcon}>⌕</Text>
           <TextInput
             style={styles.searchInput}
-            placeholder="Search posts..."
+            placeholder="Search posts, authors..."
             placeholderTextColor={colors.placeholder}
-            value={search}
-            onChangeText={setSearch}
+            value={query}
+            onChangeText={handleSearch}
+            returnKeyType="search"
+            autoCorrect={false}
           />
-          {search.length > 0 && (
-            <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          {query.length > 0 && (
+            <TouchableOpacity onPress={() => handleSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.searchClear}>✕</Text>
             </TouchableOpacity>
           )}
         </View>
-
-        {/* Type filter */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.filterScroll}
-          contentContainerStyle={styles.filterContent}
-        >
-          {['All', ...POST_TYPES.map(p => p.label)].map(f => {
-            const t      = POST_TYPES.find(p => p.label === f);
-            const active = typeFilter === f;
-            return (
-              <TouchableOpacity
-                key={f}
-                style={[styles.typePill, active && styles.typePillActive]}
-                onPress={() => setTypeFilter(f)}
-                activeOpacity={0.8}
-              >
-                {t && <View style={[styles.typePillDot, { backgroundColor: active ? 'rgba(255,255,255,0.7)' : t.color }]} />}
-                <Text style={[styles.typePillText, active && styles.typePillTextActive]}>{f}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-
-        {/* Dept filter */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.filterScroll}
-          contentContainerStyle={styles.filterContent}
-        >
-          {[{ id: 'all', label: 'All departments' }, ...DEPARTMENTS].map(d => (
-            <TouchableOpacity
-              key={d.id}
-              style={[styles.deptPill, deptFilter === d.id && (d.id === 'all' ? styles.deptPillAllActive : styles.deptPillActive)]}
-              onPress={() => setDeptFilter(d.id)}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.deptPillText, deptFilter === d.id && (d.id === 'all' ? styles.deptPillTextAllActive : styles.deptPillTextActive)]}>
-                {d.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
       </View>
 
-      {/* Post list */}
+      {/* Filters */}
+      <View style={styles.filterWrap}>
+        <FilterBar
+          activeType={activeType}
+          setActiveType={setActiveType}
+          activeDept={activeDept}
+          setActiveDept={setActiveDept}
+          departments={myDepts}
+          activePostTypes={activePostTypes}
+        />
+      </View>
+
+      {/* Results count */}
+      {!loading && (
+        <Text style={styles.resultsCount}>
+          {posts.length}{hasMore ? '+' : ''} post{posts.length !== 1 ? 's' : ''}
+          {activeType || activeDept || query ? ' found' : ' archived · newest first'}
+        </Text>
+      )}
+
+      {/* List */}
       <FlatList
-        data={listItems}
-        keyExtractor={(item, index) => item.id ? String(item.id) : `header-${index}`}
+        data={loading ? [] : posts}
+        keyExtractor={item => String(item.id)}
         renderItem={renderItem}
+        ListEmptyComponent={!loading ? renderEmpty : null}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
-        ListEmptyComponent={
-          <View style={styles.emptyWrap}>
-            <Text style={styles.emptyTitle}>No posts found</Text>
-            <Text style={styles.emptySub}>
-              {search ? 'Try a different search term.' : 'Nothing archived yet.'}
-            </Text>
-            {(search || typeFilter !== 'All' || deptFilter !== 'all') && (
-              <TouchableOpacity
-                style={styles.clearBtn}
-                onPress={() => { setSearch(''); setTypeFilter('All'); setDeptFilter('all'); }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.clearBtnText}>Clear filters</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        }
+        onEndReached={handleLoadMore}
+        onEndReachedThreshold={0.3}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        ListFooterComponent={loadingMore ? (
+          <Text style={styles.loadingMore}>Loading more...</Text>
+        ) : null}
       />
-
-      {/* Post detail */}
-      <PostDetailSheet post={selected} onClose={() => setSelected(null)} />
     </View>
   );
 }
 
-// ── STYLES ────────────────────────────────────────────────────────────────────
+// ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#F3F4F6' },
-
-  headerBlock: { backgroundColor: colors.white, paddingTop: StatusBar.currentHeight, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  appHeader: { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.page, backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  backBtn: { width: 36, alignItems: 'flex-start', justifyContent: 'center' },
-  backBtnText: { fontSize: 28, color: colors.brand, fontWeight: '300', lineHeight: 32 },
-  appHeaderCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, justifyContent: 'center' },
-  appLogo: { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
-  appLogoAccent: { color: colors.brand },
-  appSep: { fontSize: 14, color: colors.border },
-  appOrg: { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
-
-  // Top section
-  topSection: { backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight, paddingTop: spacing.md },
-  pageTitleRow: { flexDirection: 'row', alignItems: 'baseline', gap: spacing.sm, paddingHorizontal: spacing.page, marginBottom: spacing.md },
-  pageTitle: { fontSize: 22, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
-  pageSub: { fontSize: 13, color: colors.subtle },
-
-  // Search
-  searchWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderLight, borderRadius: radius.lg, paddingHorizontal: spacing.md, marginHorizontal: spacing.page, marginBottom: spacing.sm, minHeight: 42 },
-  searchIcon: { fontSize: 16, color: colors.placeholder, marginRight: spacing.sm },
-  searchInput: { flex: 1, fontSize: 14, color: colors.black },
-  searchClear: { fontSize: 14, color: colors.placeholder, padding: 4 },
-
-  // Filters
-  filterScroll: { marginBottom: spacing.sm },
-  filterContent: { gap: 6, paddingHorizontal: spacing.page },
-  typePill: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 5, borderRadius: 100, borderWidth: 1, borderColor: colors.borderLight, backgroundColor: colors.white },
-  typePillActive: { backgroundColor: colors.black, borderColor: colors.black },
-  typePillDot: { width: 5, height: 5, borderRadius: 3 },
-  typePillText: { fontSize: 12, color: colors.muted, fontWeight: typography.medium },
-  typePillTextActive: { color: colors.white },
-  deptPill: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 100, borderWidth: 1, borderColor: colors.borderLight, backgroundColor: colors.white },
-  deptPillActive: { backgroundColor: '#EFF6FF', borderColor: colors.brand },
-  deptPillAllActive: { backgroundColor: colors.black, borderColor: colors.black },
-  deptPillText: { fontSize: 12, color: colors.muted, fontWeight: typography.medium },
-  deptPillTextActive: { color: colors.brand, fontWeight: typography.semibold },
-  deptPillTextAllActive: { color: colors.white, fontWeight: typography.semibold },
-
-  // List
-  listContent: { paddingHorizontal: spacing.page, paddingTop: spacing.md, paddingBottom: 48 },
-
-  // Group headers
-  groupHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm, marginTop: spacing.md },
-  groupHeaderText: { fontSize: 11, fontWeight: typography.bold, color: colors.subtle, textTransform: 'uppercase', letterSpacing: 0.8 },
-  groupHeaderLine: { flex: 1, height: 1, backgroundColor: colors.borderLight },
-  groupHeaderCount: { fontSize: 11, fontWeight: typography.bold, color: colors.placeholder },
-
-  // History row — compact
-  historyRow: { flexDirection: 'row', backgroundColor: colors.white, borderRadius: radius.xl, marginBottom: spacing.sm, borderWidth: 1, borderColor: colors.borderLight, overflow: 'hidden' },
-  historyRowBar: { width: 3, flexShrink: 0 },
-  historyRowContent: { flex: 1, padding: spacing.md },
-  historyRowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
-  historyTypeBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 4 },
-  historyTypeDot: { width: 5, height: 5, borderRadius: 3 },
-  historyTypeText: { fontSize: 10, fontWeight: typography.black, letterSpacing: 0.4, textTransform: 'uppercase' },
-  historyRowTime: { fontSize: 11, color: colors.subtle },
-  historyRowText: { fontSize: 14, color: '#374151', lineHeight: 20, marginBottom: 8 },
-  historyRowBottom: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  historyRowAuthor: { fontSize: 12, color: colors.muted, fontWeight: typography.medium, flex: 1 },
-  historyRowStats: { flexDirection: 'row', gap: 8 },
-  historyRowStat: { fontSize: 12, color: colors.subtle },
-
-  // Empty
-  emptyWrap: { alignItems: 'center', paddingVertical: 48 },
-  emptyTitle: { fontSize: 16, fontWeight: typography.bold, color: colors.black, marginBottom: 6 },
-  emptySub: { fontSize: 14, color: colors.subtle, marginBottom: spacing.lg },
-  clearBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: spacing.xl, paddingVertical: 10 },
-  clearBtnText: { fontSize: 14, fontWeight: typography.semibold, color: '#374151' },
-
-  // Avatar
-  avatar: { borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  avatarText: { fontWeight: typography.bold },
-
-  // Post detail sheet
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  detailSheet: { backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '88%' },
-  sheetHandle: { width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 4 },
-  detailTypeStrip: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: spacing.md, paddingVertical: 10 },
-  detailTypeDot: { width: 7, height: 7, borderRadius: 4 },
-  detailTypeLabel: { fontSize: 11, fontWeight: typography.black, letterSpacing: 0.8, textTransform: 'uppercase', flex: 1 },
-  detailDeptChip: { backgroundColor: 'rgba(0,0,0,0.06)', borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 },
-  detailDeptChipText: { fontSize: 10, fontWeight: typography.semibold, color: '#374151' },
-  archiveBadge: { backgroundColor: 'rgba(0,0,0,0.08)', borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 },
-  archiveBadgeText: { fontSize: 10, fontWeight: typography.bold, color: '#374151' },
-  detailScroll: { padding: spacing.page },
-  detailMeta: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md },
-  detailAuthor: { fontSize: 14, fontWeight: typography.bold, color: colors.black },
-  detailDate: { fontSize: 12, color: colors.subtle, marginTop: 1 },
-  detailContentWrap: { marginBottom: spacing.md },
-  postDetailContent: { fontSize: 16, color: '#1F2937', lineHeight: 25 },
-  mention: { color: colors.brand, fontWeight: typography.semibold },
-  detailAckBar: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: colors.surface, borderRadius: radius.md, padding: spacing.sm, marginBottom: spacing.md },
-  detailAckTrack: { width: 48, height: 3, backgroundColor: colors.border, borderRadius: 2, overflow: 'hidden' },
-  detailAckFill: { height: '100%', borderRadius: 2 },
-  detailAckText: { fontSize: 12, color: colors.muted, flex: 1 },
-  detailReactions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: spacing.md },
-  detailReactionChip: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderLight, borderRadius: 100, paddingHorizontal: 10, paddingVertical: 4 },
-  detailReactionText: { fontSize: 13, fontWeight: typography.semibold, color: '#374151' },
-  detailStats: { borderTopWidth: 1, borderTopColor: colors.borderLight, paddingTop: spacing.md, gap: 4 },
-  detailStatText: { fontSize: 13, color: colors.muted },
-  detailStatNote: { fontSize: 12, color: colors.subtle, fontStyle: 'italic' },
+  root:           { flex: 1, backgroundColor: '#F3F4F6' },
+  headerBlock:    { backgroundColor: colors.white, paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0 },
+  appHeader:      { height: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.page, backgroundColor: colors.white },
+  backBtn:        { width: 60 },
+  backText:       { fontSize: 15, color: colors.brand, fontWeight: typography.medium },
+  headerTitle:    { fontSize: 16, fontWeight: typography.bold, color: colors.black },
+  searchWrap:     { backgroundColor: colors.white, paddingHorizontal: spacing.page, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  searchBox:      { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F3F4F6', borderRadius: radius.lg, paddingHorizontal: spacing.md, height: 40 },
+  searchIcon:     { fontSize: 16, color: colors.placeholder, marginRight: 6 },
+  searchInput:    { flex: 1, fontSize: 14, color: colors.black },
+  searchClear:    { fontSize: 14, color: colors.placeholder, padding: 4 },
+  filterWrap:     { backgroundColor: colors.white, paddingHorizontal: spacing.page, paddingBottom: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  filterRow:      { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
+  filterBtn:      { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 100, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.white },
+  filterDot:      { width: 6, height: 6, borderRadius: 3 },
+  filterBtnText:  { fontSize: 13, color: colors.muted, fontWeight: typography.medium },
+  clearBtn:       { paddingHorizontal: 10, paddingVertical: 7 },
+  clearBtnText:   { fontSize: 13, color: colors.brand, fontWeight: typography.medium },
+  dropdown:       { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, marginTop: spacing.sm, overflow: 'hidden', zIndex: 100 },
+  dropdownItem:   { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: spacing.md, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  dropdownText:   { fontSize: 14, color: colors.muted },
+  resultsCount:   { fontSize: 12, color: colors.subtle, paddingHorizontal: spacing.page, paddingTop: spacing.sm, paddingBottom: 4 },
+  listContent:    { paddingHorizontal: spacing.page, paddingTop: spacing.sm, paddingBottom: 40 },
+  card:           { backgroundColor: colors.white, borderRadius: radius.xl, marginBottom: spacing.sm, overflow: 'hidden', borderWidth: 1, borderColor: colors.borderLight },
+  cardStrip:      { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: 8 },
+  typeDot:        { width: 6, height: 6, borderRadius: 3 },
+  typeLabel:      { fontSize: 10, fontWeight: typography.black, letterSpacing: 0.8, flex: 1 },
+  deptChip:       { borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2, backgroundColor: 'rgba(0,0,0,0.06)' },
+  deptChipText:   { fontSize: 10, fontWeight: typography.semibold, color: '#374151' },
+  timeAgo:        { fontSize: 11, color: colors.subtle },
+  cardBody:       { padding: spacing.md },
+  authorRow:      { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 8 },
+  authorName:     { fontSize: 13, fontWeight: typography.semibold, color: colors.black },
+  postContent:    { fontSize: 14, color: '#374151', lineHeight: 21, marginBottom: 10 },
+  highlight:      { backgroundColor: '#FEF9C3', color: '#92400E', fontWeight: typography.semibold },
+  statsRow:       { flexDirection: 'row', gap: spacing.md, flexWrap: 'wrap' },
+  statText:       { fontSize: 12, color: colors.subtle },
+  emptyWrap:      { alignItems: 'center', paddingVertical: 60, paddingHorizontal: spacing.page },
+  emptyTitle:     { fontSize: 16, fontWeight: typography.bold, color: colors.black, marginBottom: 6, textAlign: 'center' },
+  emptySub:       { fontSize: 14, color: colors.subtle, textAlign: 'center', lineHeight: 21 },
+  clearAllBtn:    { marginTop: spacing.lg, paddingHorizontal: spacing.xl, paddingVertical: 10, borderRadius: radius.md, backgroundColor: colors.brand },
+  clearAllBtnText:{ fontSize: 14, fontWeight: typography.semibold, color: colors.white },
+  loadingMore:    { textAlign: 'center', fontSize: 12, color: colors.subtle, paddingVertical: 16 },
+  avatar:         { borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  avatarText:     { fontWeight: typography.bold },
 });

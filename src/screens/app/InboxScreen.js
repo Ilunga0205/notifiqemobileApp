@@ -1,123 +1,24 @@
 // src/screens/app/InboxScreen.js
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, TextInput,
-  StyleSheet,  Platform, StatusBar, Animated,
+  View, Text, FlatList, TouchableOpacity, TextInput,
+  StyleSheet, Platform, StatusBar,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
+import { useApp } from '../../context/AppContext';
+import { supabase } from '../../lib/supabase';
+import { getPostType, acknowledgePost, addComment } from '../../services/post.service';
+import CommentInput from '../../components/CommentInput';
 
-// ── DATA ──────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-const CURRENT_USER = { name: 'Abel I.', initials: 'AI', color: '#1D4ED8' };
-
-const MOCK_INBOX = [
-  {
-    id: 'i1',
-    kind: 'mention',        // @ tagged you
-    done: false,
-    post: {
-      id: 4,
-      type: 'Announcement',
-      typeColor: '#1D4ED8',
-      typeBg: '#EFF6FF',
-      author: 'Sarah M.',
-      authorInitials: 'SM',
-      authorColor: '#1D4ED8',
-      content: 'Abel please can you make sure the website is updated before the client meeting on Friday.',
-      time: '9:04 AM',
-      date: 'Today',
-    },
-  },
-  {
-    id: 'i2',
-    kind: 'ack',            // confirm read
-    done: false,
-    post: {
-      id: 2,
-      type: 'Announcement',
-      typeColor: '#1D4ED8',
-      typeBg: '#EFF6FF',
-      author: 'James K.',
-      authorInitials: 'JK',
-      authorColor: '#065F46',
-      content: 'Q2 budget review is on Friday at 3pm. Please have your reports ready.',
-      time: '9:30 AM',
-      date: 'Today',
-    },
-  },
-  {
-    id: 'i3',
-    kind: 'question',       // direct question — @mentioned you specifically
-    done: false,
-    post: {
-      id: 5,
-      type: 'Quick Question',
-      typeColor: '#92400E',
-      typeBg: '#FEF3C7',
-      author: 'Tom R.',
-      authorInitials: 'TR',
-      authorColor: '#92400E',
-      content: '@Abel are you able to handle the server check before 2pm today?',
-      time: '11:45 AM',
-      date: 'Today',
-    },
-  },
-  // Done items
-  {
-    id: 'i4',
-    kind: 'mention',
-    done: true,
-    doneAt: 'Yesterday',
-    post: {
-      id: 6,
-      type: 'Project Update',
-      typeColor: '#5B21B6',
-      typeBg: '#F5F3FF',
-      author: 'Priya N.',
-      authorInitials: 'PN',
-      authorColor: '#9D174D',
-      content: 'Phase 2 starts Monday — @Abel please brief the team at standup.',
-      time: '3:00 PM',
-      date: 'Yesterday',
-    },
-  },
-  {
-    id: 'i5',
-    kind: 'ack',
-    done: true,
-    doneAt: 'Monday',
-    post: {
-      id: 8,
-      type: 'Announcement',
-      typeColor: '#1D4ED8',
-      typeBg: '#EFF6FF',
-      author: 'Sarah M.',
-      authorInitials: 'SM',
-      authorColor: '#1D4ED8',
-      content: 'New office hours from next month: 8am–4pm instead of 9am–5pm.',
-      time: '9:00 AM',
-      date: 'Monday',
-    },
-  },
-];
-
-// ── KIND CONFIG ───────────────────────────────────────────────────────────────
-
-const KIND_CONFIG = {
-  mention:  { label: 'Tagged you',   color: '#1D4ED8', bg: '#EFF6FF', icon: '@' },
-  ack:      { label: 'Confirm read', color: '#DC2626', bg: '#FEF2F2', icon: '!' },
-  question: { label: 'Asked you',    color: '#92400E', bg: '#FEF3C7', icon: '?' },
-};
-
-// ── HELPERS ───────────────────────────────────────────────────────────────────
-
-function Avatar({ initials, size = 28, color }) {
+function Avatar({ initials, size = 32, color }) {
   return (
     <View style={[styles.avatar, {
       width: size, height: size, borderRadius: size / 2,
       backgroundColor: color ? color + '18' : '#EFF6FF',
-      borderColor: color ? color + '35' : '#BFDBFE',
+      borderColor:     color ? color + '35' : '#BFDBFE',
     }]}>
       <Text style={[styles.avatarText, { fontSize: size * 0.33, color: color || colors.brand }]}>
         {initials}
@@ -126,375 +27,806 @@ function Avatar({ initials, size = 28, color }) {
   );
 }
 
-function renderContent(text) {
-  const parts = text.split(/(@[\w][\w\s]*[\w.])/g);
-  return (
-    <Text style={styles.itemContent} numberOfLines={3}>
-      {parts.map((part, i) =>
-        part.startsWith('@')
-          ? <Text key={i} style={styles.mention}>{part}</Text>
-          : part
-      )}
-    </Text>
-  );
+function timeAgo(dateStr) {
+  if (!dateStr) return '';
+  const d    = new Date(dateStr);
+  const diff = Math.floor((Date.now() - d) / 60000);
+  if (diff < 1)   return 'just now';
+  if (diff < 60)  return `${diff}m ago`;
+  const h = Math.floor(diff / 60);
+  if (h < 24)     return `${h}h ago`;
+  if (h < 48)     return 'yesterday';
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
-// ── INBOX ITEM ────────────────────────────────────────────────────────────────
+function getInitials(name) {
+  return (name || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+}
 
-function InboxItem({ item, onDone, onConfirm }) {
-  const [replyOpen,   setReplyOpen]   = useState(false);
-  const [replyText,   setReplyText]   = useState('');
-  const [replySent,   setReplySent]   = useState(false);
-  const kind = KIND_CONFIG[item.kind];
+// ── For You Card ──────────────────────────────────────────────────────────────
 
-  const handleSendReply = () => {
-    if (!replyText.trim()) return;
-    setReplySent(true);
-    setReplyText('');
-    setTimeout(() => {
-      setReplyOpen(false);
-      setReplySent(false);
-      onDone(item.id);
-    }, 800);
-  };
-
-  const handleDone = () => {
-    if (item.kind === 'ack') onConfirm(item.id);
-    else onDone(item.id);
-  };
+function ForYouCard({ item, onMarkDone, onPress, onReply, isReplying, replyText, setReplyText, sendingReply, orgId, userId }) {
+  const typeInfo = getPostType(item.postType);
+  const isCompleted = item.content?.startsWith('✓') && item.content?.includes('marked this done');
+  const kindMeta = isCompleted
+    ? { label: 'Completed your task', color: '#065F46', bg: '#ECFDF5', border: '#6EE7B7' }
+    : item.kind === 'mention'
+    ? { label: 'Mentioned you — action needed', color: '#5B21B6', bg: '#F5F3FF', border: '#DDD6FE' }
+    : { label: 'Replied to your post', color: '#065F46', bg: '#ECFDF5', border: '#BBF7D0' };
 
   return (
-    <View style={styles.item}>
-      {/* Type strip */}
-      <View style={[styles.itemStrip, { backgroundColor: kind.bg }]}>
-        <View style={[styles.itemStripDot, { backgroundColor: kind.color }]} />
-        <Text style={[styles.itemStripLabel, { color: kind.color }]}>
-          {kind.label.toUpperCase()}
-        </Text>
-        <Text style={styles.itemTime}>{item.post.date} · {item.post.time}</Text>
+    <TouchableOpacity
+      style={[styles.card, item.done && styles.cardDone]}
+      onPress={onPress}
+      activeOpacity={0.88}
+    >
+      {/* Kind strip */}
+      <View style={[styles.kindStrip, { backgroundColor: kindMeta.bg, borderBottomColor: kindMeta.border }]}>
+        <View style={[styles.kindDot, { backgroundColor: kindMeta.color }]} />
+        <Text style={[styles.kindLabel, { color: kindMeta.color }]}>{kindMeta.label}</Text>
+        <Text style={styles.timeAgoText}>{timeAgo(item.createdAt)}</Text>
       </View>
 
-      {/* Body */}
-      <View style={styles.itemBody}>
-        {/* Author + post type */}
-        <View style={styles.itemAuthorRow}>
-          <Avatar initials={item.post.authorInitials} size={24} color={item.post.authorColor} />
-          <Text style={styles.itemAuthor}>{item.post.author}</Text>
-          <View style={[styles.itemTypeBadge, { backgroundColor: item.post.typeBg }]}>
-            <Text style={[styles.itemTypeBadgeText, { color: item.post.typeColor }]}>
-              {item.post.type}
-            </Text>
-          </View>
+      <View style={styles.cardBody}>
+        {/* Post type context */}
+        <View style={[styles.postTypeBadge, { backgroundColor: typeInfo.bg }]}>
+          <Text style={[styles.postTypeText, { color: typeInfo.color }]}>{typeInfo.label}</Text>
         </View>
 
-        {/* Content */}
-        <View style={styles.itemContentWrap}>
-          {renderContent(item.post.content)}
+        {/* Original post context for replies */}
+        {item.kind === 'reply' && item.originalContent ? (
+          <Text style={styles.originalContent} numberOfLines={2}>
+            Your post: "{item.originalContent}"
+          </Text>
+        ) : null}
+
+        {/* Author + content */}
+        <View style={styles.authorRow}>
+          <Avatar initials={item.authorInitials} size={24} color={item.authorColor} />
+          <Text style={styles.authorName}>{item.author}</Text>
         </View>
+        <Text style={styles.content} numberOfLines={3}>
+          {(() => {
+            const typeInfo = getPostType(item.postType);
+            const parts = (item.content || '').split(/(@[^\s]+)/g);
+            return parts.map((part, i) =>
+              part.startsWith('@')
+                ? <Text key={i} style={{ color: typeInfo.color, fontWeight: '600' }}>{part}</Text>
+                : <Text key={i} style={{ color: '#374151' }}>{part}</Text>
+            );
+          })()}
+        </Text>
 
         {/* Actions */}
-        {!replyOpen ? (
-          <View style={styles.itemActions}>
-            <TouchableOpacity
-              style={[styles.doneBtn, { borderColor: kind.color + '40', backgroundColor: kind.bg }]}
-              onPress={handleDone}
-              activeOpacity={0.85}
-            >
-              <Text style={[styles.doneBtnText, { color: kind.color }]}>
-                {item.kind === 'ack' ? 'Confirm' : 'Mark done'}
-              </Text>
-            </TouchableOpacity>
-
-            {item.kind !== 'ack' && (
+        {item.done ? (
+          <Text style={styles.doneLabel}>✓  Done</Text>
+        ) : isCompleted ? (
+          // Completion notification — just view, no action needed
+          <TouchableOpacity style={[styles.viewBtn, { alignSelf: 'flex-start' }]} onPress={onPress} activeOpacity={0.8}>
+            <Text style={styles.viewBtnText}>View post →</Text>
+          </TouchableOpacity>
+        ) : (
+          <View>
+            <View style={styles.actionRow}>
+              {/* Reply inline button */}
               <TouchableOpacity
                 style={styles.replyBtn}
-                onPress={() => setReplyOpen(true)}
+                onPress={() => onReply(item)}
                 activeOpacity={0.8}
               >
-                <Text style={styles.replyBtnText}>Reply</Text>
+                <Text style={styles.replyBtnText}>
+                  {isReplying ? 'Cancel' : '↩ Reply'}
+                </Text>
               </TouchableOpacity>
+
+              {/* Mark done — only for task and quick_question */}
+              {(item.postType === 'task' || item.postType === 'quick_question') && item.kind === 'mention' && (
+                <TouchableOpacity style={styles.doneBtn} onPress={() => onMarkDone(item)} activeOpacity={0.85}>
+                  <Text style={styles.doneBtnText}>✓  Mark done</Text>
+                </TouchableOpacity>
+              )}
+
+              {/* View post — for all types */}
+              <TouchableOpacity style={styles.viewBtn} onPress={onPress} activeOpacity={0.8}>
+                <Text style={styles.viewBtnText}>View →</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Inline reply with @mention support */}
+            {isReplying && (
+              <View style={{ marginTop: 8 }}>
+                <CommentInput
+                  orgId={orgId}
+                  departmentId={null}
+                  authorId={userId}
+                  placeholder="Reply... (@ to mention)"
+                  onSend={async (text, mentionedIds) => {
+                    await addComment(item.postId, userId, text, mentionedIds);
+                    onReply(null); // close reply box
+                  }}
+                />
+              </View>
             )}
-          </View>
-        ) : (
-          /* Inline reply sheet */
-          <View style={styles.replySheet}>
-            <View style={styles.replyInputRow}>
-              <Avatar initials={CURRENT_USER.initials} size={26} color={CURRENT_USER.color} />
-              <TextInput
-                style={styles.replyInput}
-                placeholder={replySent ? 'Sent!' : 'Type your reply...'}
-                placeholderTextColor={replySent ? '#10B981' : colors.placeholder}
-                value={replyText}
-                onChangeText={setReplyText}
-                autoFocus
-                multiline
-                maxLength={500}
-              />
-            </View>
-            <View style={styles.replyFooter}>
-              <TouchableOpacity
-                onPress={() => { setReplyOpen(false); setReplyText(''); }}
-                style={styles.replyCancelBtn}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.replyCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.replySendBtn, !replyText.trim() && styles.replySendBtnDisabled]}
-                onPress={handleSendReply}
-                disabled={!replyText.trim()}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.replySendText}>Send reply</Text>
-              </TouchableOpacity>
-            </View>
           </View>
         )}
       </View>
-    </View>
+    </TouchableOpacity>
   );
 }
 
-// ── DONE ITEM (compact) ───────────────────────────────────────────────────────
+// ── Confirmation Card ─────────────────────────────────────────────────────────
 
-function DoneItem({ item }) {
-  const kind = KIND_CONFIG[item.kind];
+function ConfirmationCard({ item, onAck, onPress }) {
+  const typeInfo = getPostType(item.postType);
+
   return (
-    <View style={styles.doneItem}>
-      <View style={[styles.doneItemCheck, { backgroundColor: '#ECFDF5' }]}>
-        <Text style={styles.doneItemCheckText}>✓</Text>
+    <TouchableOpacity
+      style={[styles.card, item.done && styles.cardDone]}
+      onPress={onPress}
+      activeOpacity={0.88}
+    >
+      {/* Strip */}
+      <View style={[styles.kindStrip, {
+        backgroundColor: item.done ? '#F0FDF4' : '#FEF2F2',
+        borderBottomColor: item.done ? '#BBF7D0' : '#FECACA',
+      }]}>
+        <View style={[styles.kindDot, { backgroundColor: item.done ? '#065F46' : '#DC2626' }]} />
+        <Text style={[styles.kindLabel, { color: item.done ? '#065F46' : '#DC2626' }]}>
+          {item.done ? 'Confirmed' : 'Needs your confirmation'}
+        </Text>
+        <Text style={styles.timeAgoText}>{timeAgo(item.createdAt)}</Text>
       </View>
-      <View style={styles.doneItemInfo}>
-        <Text style={styles.doneItemAuthor}>{item.post.author}</Text>
-        <Text style={styles.doneItemContent} numberOfLines={1}>{item.post.content}</Text>
+
+      <View style={styles.cardBody}>
+        <View style={[styles.postTypeBadge, { backgroundColor: typeInfo.bg }]}>
+          <Text style={[styles.postTypeText, { color: typeInfo.color }]}>{typeInfo.label}</Text>
+        </View>
+
+        <View style={styles.authorRow}>
+          <Avatar initials={item.authorInitials} size={24} color={item.authorColor} />
+          <Text style={styles.authorName}>{item.author}</Text>
+        </View>
+        <Text style={styles.content} numberOfLines={3}>
+          {(() => {
+            const typeInfo = getPostType(item.postType);
+            const parts = (item.content || '').split(/(@[^\s]+)/g);
+            return parts.map((part, i) =>
+              part.startsWith('@')
+                ? <Text key={i} style={{ color: typeInfo.color, fontWeight: '600' }}>{part}</Text>
+                : <Text key={i} style={{ color: '#374151' }}>{part}</Text>
+            );
+          })()}
+        </Text>
+
+        {!item.done ? (
+          <View style={styles.actionRow}>
+            <TouchableOpacity style={styles.viewBtn} onPress={onPress} activeOpacity={0.8}>
+              <Text style={styles.viewBtnText}>View post</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.ackBtn} onPress={() => onAck(item)} activeOpacity={0.85}>
+              <Text style={styles.ackBtnText}>✓  Confirm read</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <Text style={styles.confirmedLabel}>✓  Confirmed</Text>
+        )}
       </View>
-      <Text style={styles.doneItemTime}>{item.doneAt}</Text>
-    </View>
+    </TouchableOpacity>
   );
 }
 
-// ── MAIN SCREEN ───────────────────────────────────────────────────────────────
+// ── Main Screen ───────────────────────────────────────────────────────────────
 
 export default function InboxScreen({ navigation }) {
-  const [items,        setItems]        = useState(MOCK_INBOX);
-  const [doneExpanded, setDoneExpanded] = useState(false);
+  const { user, orgId, profile } = useApp();
 
-  const orgName = 'Acme Corp';
+  const [forYouItems,    setForYouItems]    = useState([]);
+  const [confirmItems,   setConfirmItems]   = useState([]);
+  const [loading,        setLoading]        = useState(true);
+  const [activeTab,      setActiveTab]      = useState('foryou');
+  const [donePostIds,   setDonePostIds]   = useState(new Set()); // from DB
+  const [replyingTo,    setReplyingTo]    = useState(null);
+  const [replyText,     setReplyText]     = useState('');
+  const [sendingReply,  setSendingReply]  = useState(false);
+  const [showDone,      setShowDone]      = useState(false);
+  const listRef = useRef(null);
 
-  const pending = items.filter(i => !i.done);
-  const done    = items.filter(i => i.done);
+  const loadDataRef = useRef(null);
 
-  const handleDone = (id) => {
-    setItems(prev => prev.map(i =>
-      i.id === id ? { ...i, done: true, doneAt: 'Just now' } : i
-    ));
+  // ── Load task completions from DB ──────────────────────────────────────
+  const loadCompletions = useCallback(async () => {
+    if (!user?.id || !orgId) return;
+    const { data } = await supabase
+      .from('task_completions')
+      .select('post_id')
+      .eq('user_id', user.id);
+    if (data) setDonePostIds(new Set(data.map(d => d.post_id)));
+  }, [user?.id, orgId]);
+
+  useEffect(() => {
+    if (user?.id && orgId) loadCompletions();
+  }, [user?.id, orgId, loadCompletions]);
+
+  // ── Load inbox ──────────────────────────────────────────────────────────
+
+  const loadData = useCallback(async () => {
+    if (!orgId || !user?.id) return;
+    try {
+      // ── For You: mentions ─────────────────────────────────────────────
+      // Fetch comment-based mentions
+      const { data: commentMentions, error: cm_err } = await supabase
+        .from('comment_mentions')
+        .select(`
+          id, comment_id,
+          comments!comment_mentions_comment_id_fkey(
+            id, content, created_at, post_id,
+            author:profiles!comments_author_id_fkey(id, full_name, avatar_color, avatar_initials),
+            posts!comments_post_id_fkey(id, type, content, created_at, org_id,
+              author:profiles!posts_author_id_fkey(id, full_name, avatar_color, avatar_initials)
+            )
+          )
+        `)
+        .eq('mentioned_user_id', user.id)
+        .not('comment_id', 'is', null)
+        .order('id', { ascending: false })
+        .limit(50);
+      console.log('[Inbox] comment mentions:', commentMentions?.length, cm_err?.message);
+
+      // Fetch post-body mentions separately
+      const { data: postMentions, error: pm_err } = await supabase
+        .from('comment_mentions')
+        .select(`
+          id, post_id,
+          posts!comment_mentions_post_id_fkey(
+            id, type, content, created_at, org_id,
+            author:profiles!posts_author_id_fkey(id, full_name, avatar_color, avatar_initials)
+          )
+        `)
+        .eq('mentioned_user_id', user.id)
+        .not('post_id', 'is', null)
+        .is('comment_id', null)
+        .order('id', { ascending: false })
+        .limit(50);
+      console.log('[Inbox] post mentions:', postMentions?.length, pm_err?.message);
+      console.log('[Inbox] post mentions raw:', JSON.stringify(postMentions));
+
+      const mentions = { commentMentions: commentMentions || [], postMentions: postMentions || [] };
+
+      // ── For You: replies to my posts ───────────────────────────────────
+      const { data: myPosts } = await supabase
+        .from('posts')
+        .select('id, type, content')
+        .eq('org_id', orgId)
+        .eq('author_id', user.id);
+
+      let replies = [];
+      if (myPosts?.length > 0) {
+        const { data: replyData } = await supabase
+          .from('comments')
+          .select(`
+            id, content, created_at, post_id,
+            author:profiles!comments_author_id_fkey(id, full_name, avatar_color, avatar_initials)
+          `)
+          .in('post_id', myPosts.map(p => p.id))
+          .neq('author_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(50);
+        replies = replyData || [];
+      }
+
+      // Build For You list
+      const forYou = [];
+
+      // Comment mentions
+      mentions.commentMentions.forEach(m => {
+        const comment = m.comments;
+        const post    = comment?.posts;
+        if (!comment || !post) return;
+        if (post.org_id !== orgId) return;
+        forYou.push({
+          id:               `mention-${m.id}`,
+          kind:             'mention',
+          postId:           post.id,
+          postType:         post.type,
+          author:           comment.author?.full_name || 'Unknown',
+          authorInitials:   comment.author?.avatar_initials || getInitials(comment.author?.full_name),
+          authorColor:      comment.author?.avatar_color || colors.brand,
+          originalAuthorId: post.author?.id,
+          content:          comment.content,
+          createdAt:        comment.created_at,
+        });
+      });
+
+      // Post-body mentions (tasks, announcements with @)
+      mentions.postMentions.forEach(m => {
+        const post = m.posts;
+        if (!post) return;
+        if (post.org_id !== orgId) return;
+        forYou.push({
+          id:               `mention-${m.id}`,
+          kind:             'mention',
+          postId:           post.id,
+          postType:         post.type,
+          author:           post.author?.full_name || 'Unknown',
+          authorInitials:   post.author?.avatar_initials || getInitials(post.author?.full_name),
+          authorColor:      post.author?.avatar_color || colors.brand,
+          originalAuthorId: post.author?.id,
+          content:          post.content,
+          createdAt:        post.created_at,
+        });
+      });
+
+      // Replies
+      replies.forEach(reply => {
+        const post = myPosts?.find(p => p.id === reply.post_id);
+        forYou.push({
+          id:              `reply-${reply.id}`,
+          kind:            'reply',
+          postId:          reply.post_id,
+          postType:        post?.type || 'general_update',
+          originalContent: post?.content || '',
+          author:          reply.author?.full_name || 'Unknown',
+          authorInitials:  reply.author?.avatar_initials || getInitials(reply.author?.full_name),
+          authorColor:     reply.author?.avatar_color || colors.brand,
+          content:         reply.content,
+          createdAt:       reply.created_at,
+        });
+      });
+
+      // Sort newest first
+      forYou.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      setForYouItems(forYou);
+
+      // ── Confirmations ──────────────────────────────────────────────────
+      const { data: ackPosts } = await supabase
+        .from('posts')
+        .select(`
+          id, type, content, created_at,
+          author:profiles!posts_author_id_fkey(id, full_name, avatar_color, avatar_initials),
+          post_acknowledgements(user_id),
+          departments(id, name, department_members(user_id))
+        `)
+        .eq('org_id', orgId)
+        .eq('requires_ack', true)
+        .order('created_at', { ascending: false });
+
+      const confirms = [];
+      ;(ackPosts || []).forEach(post => {
+        const deptMembers = post.departments?.department_members || [];
+        const isInDept    = deptMembers.some(m => m.user_id === user.id);
+        if (!isInDept) return;
+
+        const hasAcked = (post.post_acknowledgements || []).some(a => a.user_id === user.id);
+        confirms.push({
+          id:             `ack-${post.id}`,
+          kind:           'ack',
+          done:           hasAcked,
+          postId:         post.id,
+          postType:       post.type,
+          author:         post.author?.full_name || 'Unknown',
+          authorInitials: post.author?.avatar_initials || getInitials(post.author?.full_name),
+          authorColor:    post.author?.avatar_color || colors.brand,
+          content:        post.content,
+          createdAt:      post.created_at,
+        });
+      });
+
+      // Pending first
+      confirms.sort((a, b) => {
+        if (a.done !== b.done) return a.done ? 1 : -1;
+        return new Date(b.createdAt) - new Date(a.createdAt);
+      });
+      setConfirmItems(confirms);
+
+    } catch (err) {
+      console.warn('InboxScreen loadData error:', err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [orgId, user?.id]);
+
+  useEffect(() => { loadDataRef.current = loadData; });
+
+  useEffect(() => {
+    if (orgId && user?.id) loadData();
+  }, [orgId, user?.id, loadData]);
+
+  // ── Realtime ────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!orgId) return;
+    const reload = () => loadDataRef.current?.();
+    const channel = supabase
+      .channel(`inbox-${orgId}-${user?.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'post_acknowledgements' }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'comment_mentions'      }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'comments'              }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'posts', filter: `org_id=eq.${orgId}` }, reload)
+      .subscribe();
+    return () => supabase.removeChannel(channel);
+  }, [orgId, user?.id]);
+
+  // ── Handlers ────────────────────────────────────────────────────────────
+
+  const handleReply = async (item) => {
+    if (!replyText.trim() || sendingReply) return;
+    setSendingReply(true);
+    try {
+
+      await addComment(item.postId, user.id, replyText.trim(), []);
+      setReplyText('');
+      setReplyingTo(null);
+      await loadData();
+    } catch (e) {
+      console.warn('[Inbox] reply error:', e.message);
+    } finally {
+      setSendingReply(false);
+    }
   };
 
-  const handleConfirm = (id) => {
-    setItems(prev => prev.map(i =>
-      i.id === id ? { ...i, done: true, doneAt: 'Just now' } : i
-    ));
+  const handleAck = async (item) => {
+    setConfirmItems(prev => prev.map(i => i.id === item.id ? { ...i, done: true } : i));
+    await acknowledgePost(item.postId, user.id);
   };
 
-  return (
-    <View style={styles.root}>
-      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={Platform.OS === 'android'} />
+  const handleMarkDone = async (item) => {
+    // Optimistic update
+    setDonePostIds(prev => new Set([...prev, item.postId]));
+    setForYouItems(prev => prev.map(i => i.id === item.id ? { ...i, done: true } : i));
 
+    try {
+      // Save to DB — persistent record
+      await supabase
+        .from('task_completions')
+        .upsert({ post_id: item.postId, user_id: user.id }, { onConflict: 'post_id,user_id' });
+
+      // Post system comment — sender sees it on feed card AND in their Inbox
+      const doneName = profile?.full_name || 'Someone';
+      await addComment(
+        item.postId,
+        user.id,
+        `✓ ${doneName} marked this done`,
+        [item.originalAuthorId].filter(Boolean)
+      );
+    } catch (e) {
+      console.warn('[Inbox] mark done error:', e.message);
+    }
+  };
+
+  const handlePress = (item) => {
+    // Inbox and PostDetail are both in AppStack — same level
+    navigation.navigate('PostDetail', { postId: item.postId });
+  };
+
+  // ── Counts ──────────────────────────────────────────────────────────────
+
+  // Mark items done if their postId is in completions
+  const forYouDisplay = forYouItems
+    .map(i => ({ ...i, done: i.done || donePostIds.has(i.postId) }))
+    // Sort: pending task/question first, replies after, done last
+    .sort((a, b) => {
+      const aActionable = (a.postType === 'task' || a.postType === 'quick_question') && a.kind === 'mention';
+      const bActionable = (b.postType === 'task' || b.postType === 'quick_question') && b.kind === 'mention';
+      if (a.done !== b.done) return a.done ? 1 : -1;         // done goes to bottom
+      if (aActionable !== bActionable) return aActionable ? -1 : 1; // actionable on top
+      return new Date(b.createdAt) - new Date(a.createdAt);  // newest first within group
+    });
+
+  const forYouPending  = forYouDisplay.filter(i => !i.done && (i.postType === 'task' || i.postType === 'quick_question') && i.kind === 'mention').length;
+  const confirmPending = confirmItems.filter(i => !i.done).length;
+  const totalPending   = forYouPending + confirmPending;
+
+  // ── Render ──────────────────────────────────────────────────────────────
+
+  const renderEmpty = (tab) => (
+    <View style={styles.emptyWrap}>
+      <View style={styles.emptyIcon}>
+        <Text style={styles.emptyIconText}>✓</Text>
+      </View>
+      <Text style={styles.emptyTitle}>
+        {tab === 'foryou' ? 'Nothing for you yet' : 'All confirmed'}
+      </Text>
+      <Text style={styles.emptySub}>
+        {tab === 'foryou'
+          ? 'Mentions and replies to your posts will appear here.'
+          : 'You\'ve confirmed all announcements. Good work.'}
+      </Text>
+    </View>
+  );
+
+  const Header = () => (
+    <View>
       {/* Header */}
       {Platform.OS === 'ios' ? (
-        <SafeAreaView style={{ backgroundColor: colors.white }}>
-          <View style={styles.appHeader}>
+        <SafeAreaView edges={['top']} style={{ backgroundColor: colors.white }}>
+          <View style={[styles.appHeader, { borderBottomWidth: 1, borderBottomColor: colors.borderLight }]}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.backBtnText}>‹</Text>
             </TouchableOpacity>
-            <View style={styles.appHeaderCenter}>
-              <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
-              <Text style={styles.appSep}>/</Text>
-              <Text style={styles.appOrg}>{orgName}</Text>
+            <View style={styles.headerCenter}>
+              <Text style={styles.headerTitle}>Inbox</Text>
+              {totalPending > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{totalPending}</Text>
+                </View>
+              )}
             </View>
             <View style={{ width: 36 }} />
           </View>
         </SafeAreaView>
       ) : (
-        <View style={styles.headerBlock}>
+        <View style={[styles.headerBlock, { borderBottomWidth: 1, borderBottomColor: colors.borderLight }]}>
           <View style={styles.appHeader}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.backBtnText}>‹</Text>
             </TouchableOpacity>
-            <View style={styles.appHeaderCenter}>
-              <Text style={styles.appLogo}>notifi<Text style={styles.appLogoAccent}>qe</Text></Text>
-              <Text style={styles.appSep}>/</Text>
-              <Text style={styles.appOrg}>{orgName}</Text>
+            <View style={styles.headerCenter}>
+              <Text style={styles.headerTitle}>Inbox</Text>
+              {totalPending > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{totalPending}</Text>
+                </View>
+              )}
             </View>
             <View style={{ width: 36 }} />
           </View>
         </View>
       )}
 
-      <ScrollView
-        style={styles.scroll}
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Page title */}
-        <View style={styles.pageHeader}>
-          <View style={styles.pageTitleRow}>
-            <Text style={styles.pageTitle}>Inbox</Text>
-            {pending.length > 0 && (
-              <View style={styles.pendingBadge}>
-                <Text style={styles.pendingBadgeText}>{pending.length}</Text>
-              </View>
-            )}
-          </View>
-          <Text style={styles.pageSub}>Things the team needs from you</Text>
-        </View>
+      {/* Tabs */}
+      <View style={styles.tabs}>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'foryou' && styles.tabActive]}
+          onPress={() => setActiveTab('foryou')}
+          activeOpacity={0.8}
+        >
+          <Text style={[styles.tabText, activeTab === 'foryou' && styles.tabTextActive]}>
+            For you {forYouPending > 0 ? `(${forYouPending})` : ''}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'confirm' && styles.tabActive]}
+          onPress={() => setActiveTab('confirm')}
+          activeOpacity={0.8}
+        >
+          <Text style={[styles.tabText, activeTab === 'confirm' && styles.tabTextActive]}>
+            Confirmations {confirmPending > 0 ? `(${confirmPending})` : ''}
+          </Text>
+        </TouchableOpacity>
+      </View>
 
-        {/* All caught up */}
-        {pending.length === 0 && (
-          <View style={styles.caughtUp}>
-            <Text style={styles.caughtUpIcon}>✓</Text>
-            <Text style={styles.caughtUpTitle}>You're all caught up</Text>
-            <Text style={styles.caughtUpSub}>Nothing needs your attention right now.</Text>
-          </View>
-        )}
 
-        {/* Pending items */}
-        {pending.length > 0 && (
-          <View style={styles.group}>
-            <Text style={styles.groupLabel}>
-              NEEDS YOUR ATTENTION · {pending.length}
-            </Text>
-            <View style={styles.groupList}>
-              {pending.map((item, i) => (
-                <View key={item.id}>
-                  <InboxItem
-                    item={item}
-                    onDone={handleDone}
-                    onConfirm={handleConfirm}
-                  />
-                  {i < pending.length - 1 && <View style={styles.itemDivider} />}
-                </View>
-              ))}
+    </View>
+  );
+
+  return (
+    <View style={styles.root}>
+      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={Platform.OS === 'android'} />
+
+      {/* Fixed header — outside FlatList to avoid white box */}
+      <Header />
+
+      {activeTab === 'foryou' && !loading && (
+        <View style={styles.summaryStrip}>
+          {forYouPending > 0 && (
+            <View style={[styles.summaryChip, { backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }]}>
+              <Text style={[styles.summaryChipText, { color: '#5B21B6' }]}>
+                {forYouPending} action{forYouPending > 1 ? 's' : ''} needed
+              </Text>
             </View>
-          </View>
-        )}
-
-        {/* Done section — collapsed by default */}
-        {done.length > 0 && (
-          <View style={styles.group}>
-            <TouchableOpacity
-              style={styles.doneHeader}
-              onPress={() => setDoneExpanded(p => !p)}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.groupLabel}>DONE · {done.length}</Text>
-              <Text style={styles.doneChevron}>{doneExpanded ? '▾' : '▸'}</Text>
-            </TouchableOpacity>
-
-            {doneExpanded && (
-              <View style={styles.doneList}>
-                {done.map((item, i) => (
-                  <View key={item.id}>
-                    <DoneItem item={item} />
-                    {i < done.length - 1 && <View style={styles.itemDivider} />}
-                  </View>
-                ))}
+          )}
+          {(() => {
+            const actCount = forYouDisplay.filter(i => !i.done && !(
+              (i.postType === 'task' || i.postType === 'quick_question') && i.kind === 'mention' &&
+              !(i.content?.startsWith('✓'))
+            )).length;
+            return actCount > 0 ? (
+              <View style={[styles.summaryChip, { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' }]}>
+                <Text style={[styles.summaryChipText, { color: '#065F46' }]}>
+                  {actCount} activit{actCount > 1 ? 'ies' : 'y'}
+                </Text>
               </View>
-            )}
-          </View>
-        )}
+            ) : null;
+          })()}
+          {(() => {
+            const doneCount = forYouDisplay.filter(i => i.done).length;
+            return doneCount > 0 ? (
+              <TouchableOpacity
+                style={[styles.summaryChip, { backgroundColor: '#F9FAFB', borderColor: '#E5E7EB' }]}
+                onPress={() => {
+                  setShowDone(true);
+                  setTimeout(() => {
+                    listRef.current?.scrollToEnd({ animated: true });
+                  }, 100);
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.summaryChipText, { color: colors.muted }]}>
+                  {doneCount} done ↓
+                </Text>
+              </TouchableOpacity>
+            ) : null;
+          })()}
+        </View>
+      )}
 
-        <View style={{ height: 48 }} />
-      </ScrollView>
+      {activeTab === 'foryou' ? (
+        <FlatList
+          ref={listRef}
+          data={loading ? [] : (() => {
+            const isActionable = (i) =>
+              !i.done &&
+              (i.postType === 'task' || i.postType === 'quick_question') &&
+              i.kind === 'mention' &&
+              !(i.content?.startsWith('✓') && i.content?.includes('marked this done'));
+
+            const isActivity = (i) => !i.done && !isActionable(i);
+
+            const actionItems   = forYouDisplay.filter(isActionable);
+            const activityItems = forYouDisplay.filter(isActivity);
+            const doneItems_    = forYouDisplay.filter(i => i.done);
+
+            const items = [];
+            if (actionItems.length > 0) {
+              items.push({ _kind: 'section', id: 's1', label: `NEEDS YOUR ACTION · ${actionItems.length}` });
+              items.push(...actionItems);
+            }
+            if (activityItems.length > 0) {
+              items.push({ _kind: 'section', id: 's2', label: 'ACTIVITY' });
+              items.push(...activityItems);
+            }
+            if (doneItems_.length > 0) {
+              const DONE_LIMIT = 10;
+              const visibleDone = doneItems_.slice(0, DONE_LIMIT);
+              const hiddenCount = doneItems_.length - DONE_LIMIT;
+              items.push({ _kind: 'section', id: 's3', label: `DONE · ${doneItems_.length}`, collapsible: true, count: doneItems_.length });
+              if (showDone) {
+                items.push(...visibleDone);
+                if (hiddenCount > 0) {
+                  items.push({ _kind: 'done_more', id: 'done_more', hiddenCount });
+                }
+              }
+            }
+            return items;
+          })()}
+          keyExtractor={item => item.id}
+          renderItem={({ item }) => {
+            if (item._kind === 'done_more') {
+              return (
+                <View style={styles.doneMoreWrap}>
+                  <Text style={styles.doneMoreText}>
+                    + {item.hiddenCount} more completed tasks — check History to see all
+                  </Text>
+                </View>
+              );
+            }
+            if (item._kind === 'section') {
+              if (item.collapsible) {
+                return (
+                  <TouchableOpacity
+                    style={styles.sectionDivider}
+                    onPress={() => setShowDone(p => !p)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.sectionLine} />
+                    <Text style={styles.sectionLabel}>
+                      {item.label} {showDone ? '▲' : '▼'}
+                    </Text>
+                    <View style={styles.sectionLine} />
+                  </TouchableOpacity>
+                );
+              }
+              return (
+                <View style={styles.sectionDivider}>
+                  <View style={styles.sectionLine} />
+                  <Text style={styles.sectionLabel}>{item.label}</Text>
+                  <View style={styles.sectionLine} />
+                </View>
+              );
+            }
+            return (
+              <ForYouCard
+                item={item}
+                onMarkDone={handleMarkDone}
+                onPress={() => handlePress(item)}
+                orgId={orgId}
+                userId={user?.id}
+                onReply={(i) => {
+                  if (i === null) { setReplyingTo(null); return; }
+                  setReplyingTo(prev => prev?.id === i.id ? null : i);
+                  setReplyText('');
+                }}
+                isReplying={replyingTo?.id === item.id}
+                replyText={replyingTo?.id === item.id ? replyText : ''}
+                setReplyText={setReplyText}
+                sendingReply={sendingReply}
+              />
+            );
+          }}
+          ListEmptyComponent={!loading ? renderEmpty('foryou') : null}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+        />
+      ) : (
+        <FlatList
+          data={loading ? [] : confirmItems}
+          keyExtractor={item => item.id}
+          renderItem={({ item }) => (
+            <ConfirmationCard
+              item={item}
+              onAck={handleAck}
+              onPress={() => handlePress(item)}
+            />
+          )}
+          ListEmptyComponent={!loading ? renderEmpty('confirm') : null}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+        />
+      )}
     </View>
   );
 }
 
-// ── STYLES ────────────────────────────────────────────────────────────────────
+// ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#F3F4F6' },
+  root:             { flex: 1, backgroundColor: '#F3F4F6' },
+  headerBlock:      { backgroundColor: colors.white, paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0 },
+  appHeader:        { height: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.page, backgroundColor: colors.white },
+  backBtn:          { width: 36, alignItems: 'flex-start', justifyContent: 'center' },
+  backBtnText:      { fontSize: 28, color: colors.brand, fontWeight: '300', lineHeight: 32 },
+  headerCenter:     { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  headerTitle:      { fontSize: 16, fontWeight: typography.bold, color: colors.black },
+  badge:            { backgroundColor: '#DC2626', borderRadius: 10, minWidth: 20, height: 20, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
+  badgeText:        { fontSize: 11, fontWeight: typography.bold, color: colors.white },
+  tabs:             { flexDirection: 'row', backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  tab:              { flex: 1, paddingVertical: 12, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabActive:        { borderBottomColor: colors.brand },
+  tabText:          { fontSize: 13, fontWeight: typography.medium, color: colors.muted },
+  tabTextActive:    { color: colors.brand, fontWeight: typography.semibold },
 
-  headerBlock: { backgroundColor: colors.white, paddingTop: StatusBar.currentHeight, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  appHeader: { height: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.page, backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
-  appHeaderCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, justifyContent: 'center' },
-  backBtn: { width: 36, alignItems: 'flex-start', justifyContent: 'center' },
-  backBtnText: { fontSize: 28, color: colors.brand, fontWeight: '300', lineHeight: 32 },
-  appLogo: { fontSize: 17, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
-  appLogoAccent: { color: colors.brand },
-  appSep: { fontSize: 14, color: colors.border },
-  appOrg: { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
-
-  scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: spacing.page, paddingTop: spacing.lg },
-
-  // Page header
-  pageHeader: { marginBottom: spacing.lg },
-  pageTitleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: 4 },
-  pageTitle: { fontSize: 22, fontWeight: typography.black, letterSpacing: -0.5, color: colors.black },
-  pendingBadge: { backgroundColor: '#DC2626', borderRadius: 100, paddingHorizontal: 8, paddingVertical: 2, minWidth: 24, alignItems: 'center' },
-  pendingBadgeText: { fontSize: 12, fontWeight: typography.bold, color: colors.white },
-  pageSub: { fontSize: 13, color: colors.subtle },
-
-  // Caught up
-  caughtUp: { alignItems: 'center', paddingVertical: 56, backgroundColor: colors.white, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.borderLight, marginBottom: spacing.lg },
-  caughtUpIcon: { fontSize: 28, color: '#10B981', marginBottom: spacing.md },
-  caughtUpTitle: { fontSize: 17, fontWeight: typography.bold, color: colors.black, marginBottom: 6 },
-  caughtUpSub: { fontSize: 14, color: colors.subtle },
-
-  // Groups
-  group: { marginBottom: spacing.lg },
-  groupLabel: { fontSize: 11, fontWeight: typography.bold, color: colors.subtle, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: spacing.sm },
-  groupList: { backgroundColor: colors.white, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.borderLight, overflow: 'hidden' },
-  itemDivider: { height: 1, backgroundColor: colors.borderLight },
-
-  // Inbox item
-  item: { overflow: 'hidden' },
-  itemStrip: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: spacing.md, paddingVertical: 9 },
-  itemStripDot: { width: 6, height: 6, borderRadius: 3 },
-  itemStripLabel: { fontSize: 10, fontWeight: typography.black, letterSpacing: 0.8, flex: 1 },
-  itemTime: { fontSize: 11, color: colors.subtle },
-  itemBody: { padding: spacing.md, paddingBottom: spacing.lg },
-  itemAuthorRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
-  itemAuthor: { fontSize: 13, fontWeight: typography.bold, color: colors.black, flex: 1 },
-  itemTypeBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  itemTypeBadgeText: { fontSize: 10, fontWeight: typography.bold, textTransform: 'uppercase', letterSpacing: 0.3 },
-  itemContentWrap: { marginBottom: 18 },
-  itemContent: { fontSize: 14, color: '#374151', lineHeight: 21 },
-  mention: { color: colors.brand, fontWeight: typography.semibold },
-
-  // Item actions
-  itemActions: { flexDirection: 'row', gap: spacing.sm },
-  doneBtn: { flex: 1, paddingVertical: 10, borderRadius: radius.md, borderWidth: 1, alignItems: 'center' },
-  doneBtnText: { fontSize: 13, fontWeight: typography.bold },
-  replyBtn: { flex: 1, paddingVertical: 10, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center', backgroundColor: colors.white },
-  replyBtnText: { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
-
-  // Inline reply sheet
-  replySheet: { backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.md, borderWidth: 1, borderColor: colors.borderLight },
-  replyInputRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
-  replyInput: { flex: 1, fontSize: 14, color: colors.black, lineHeight: 20, minHeight: 60, textAlignVertical: 'top' },
-  replyFooter: { flexDirection: 'row', justifyContent: 'flex-end', gap: spacing.sm },
-  replyCancelBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
-  replyCancelText: { fontSize: 13, fontWeight: typography.semibold, color: colors.muted },
-  replySendBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.md, backgroundColor: colors.brand },
-  replySendBtnDisabled: { backgroundColor: colors.border },
-  replySendText: { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
-
-  // Done section
-  doneHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
-  doneChevron: { fontSize: 14, color: colors.subtle, fontWeight: typography.bold },
-  doneList: { backgroundColor: colors.white, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.borderLight, overflow: 'hidden' },
-  doneItem: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: spacing.md, minHeight: 52 },
-  doneItemCheck: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  doneItemCheckText: { fontSize: 12, color: '#065F46', fontWeight: typography.bold },
-  doneItemInfo: { flex: 1, minWidth: 0 },
-  doneItemAuthor: { fontSize: 12, fontWeight: typography.semibold, color: colors.muted },
-  doneItemContent: { fontSize: 13, color: colors.subtle },
-  doneItemTime: { fontSize: 11, color: colors.placeholder, flexShrink: 0 },
-
-  // Avatar
-  avatar: { borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  avatarText: { fontWeight: typography.bold },
+  listContent:      { paddingHorizontal: spacing.page, paddingTop: spacing.sm, paddingBottom: 60, gap: spacing.sm },
+  card:             { backgroundColor: colors.white, borderRadius: radius.xl, overflow: 'hidden', borderWidth: 1, borderColor: colors.borderLight },
+  cardDone:         { opacity: 0.55 },
+  kindStrip:        { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: 8, borderBottomWidth: 1 },
+  kindDot:          { width: 6, height: 6, borderRadius: 3, flexShrink: 0 },
+  kindLabel:        { fontSize: 11, fontWeight: typography.bold, letterSpacing: 0.3, flex: 1 },
+  timeAgoText:      { fontSize: 11, color: colors.subtle },
+  cardBody:         { padding: spacing.md },
+  postTypeBadge:    { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, marginBottom: spacing.sm },
+  postTypeText:     { fontSize: 10, fontWeight: typography.bold, textTransform: 'uppercase', letterSpacing: 0.5 },
+  authorRow:        { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  authorName:       { fontSize: 13, fontWeight: typography.semibold, color: colors.black },
+  content:          { fontSize: 14, color: '#374151', lineHeight: 21, marginBottom: spacing.sm },
+  originalContent:  { fontSize: 12, color: colors.subtle, fontStyle: 'italic', marginBottom: 8, paddingLeft: 8, borderLeftWidth: 2, borderLeftColor: colors.borderLight },
+  actionRow:        { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
+  viewBtn:          { flex: 1, paddingVertical: 9, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center' },
+  viewBtnText:      { fontSize: 13, color: colors.muted, fontWeight: typography.medium },
+  doneBtn:          { flex: 1, paddingVertical: 9, borderRadius: radius.md, backgroundColor: '#5B21B6', alignItems: 'center' },
+  doneBtnText:      { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  doneLabel:        { fontSize: 12, color: '#5B21B6', fontWeight: typography.semibold, marginTop: 4 },
+  sectionDivider:   { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 },
+  sectionLine:      { flex: 1, height: 1, backgroundColor: colors.borderLight },
+  sectionLabel:     { fontSize: 10, fontWeight: '700', color: colors.subtle, letterSpacing: 0.8 },
+  summaryStrip:     { flexDirection: 'row', gap: 8, paddingHorizontal: spacing.page, paddingVertical: 10, backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  summaryChip:      { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 100, borderWidth: 1 },
+  summaryChipText:  { fontSize: 12, fontWeight: '600' },
+  doneMoreWrap:     { paddingVertical: 12, alignItems: 'center' },
+  doneMoreText:     { fontSize: 12, color: colors.subtle, textAlign: 'center', fontStyle: 'italic' },
+  replyBtn:         { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: colors.border },
+  replyBtnText:     { fontSize: 12, color: colors.muted, fontWeight: typography.medium },
+  inlineReply:      { flexDirection: 'row', gap: 8, marginTop: 8, alignItems: 'center' },
+  inlineInput:      { flex: 1, borderWidth: 1, borderColor: colors.brand, borderRadius: 100, paddingHorizontal: 12, paddingVertical: 7, fontSize: 13, color: colors.black, backgroundColor: colors.white },
+  inlineSend:       { backgroundColor: colors.brand, borderRadius: 100, paddingHorizontal: 14, paddingVertical: 7 },
+  inlineSendText:   { fontSize: 12, fontWeight: typography.semibold, color: colors.white },
+  ackBtn:           { flex: 1, paddingVertical: 9, borderRadius: radius.md, backgroundColor: colors.brand, alignItems: 'center' },
+  ackBtnText:       { fontSize: 13, fontWeight: typography.semibold, color: colors.white },
+  confirmedLabel:   { fontSize: 12, color: '#065F46', fontWeight: typography.semibold, marginTop: 4 },
+  emptyWrap:        { alignItems: 'center', paddingVertical: 60, paddingHorizontal: spacing.page },
+  emptyIcon:        { width: 56, height: 56, borderRadius: 28, backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#BBF7D0', alignItems: 'center', justifyContent: 'center', marginBottom: spacing.md },
+  emptyIconText:    { fontSize: 22, color: '#065F46', fontWeight: typography.bold },
+  emptyTitle:       { fontSize: 16, fontWeight: typography.bold, color: colors.black, marginBottom: 6 },
+  emptySub:         { fontSize: 14, color: colors.subtle, textAlign: 'center', lineHeight: 21 },
+  avatar:           { borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  avatarText:       { fontWeight: typography.bold },
 });

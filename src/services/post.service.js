@@ -5,7 +5,7 @@ import { supabase } from '../lib/supabase';
 
 export const POST_TYPES = [
   { id: 'announcement',   label: 'Announcement',   color: '#1D4ED8', bg: '#EFF6FF' },
-  { id: 'leave_notice',   label: 'Leave Notice',   color: '#0369A1', bg: '#E0F2FE' },
+  { id: 'task',           label: 'Task',            color: '#7C3AED', bg: '#F5F3FF' },
   { id: 'project_update', label: 'Project Update', color: '#5B21B6', bg: '#F5F3FF' },
   { id: 'quick_question', label: 'Quick Question', color: '#9D174D', bg: '#FDF2F8' },
   { id: 'team_win',       label: 'Team Win',       color: '#065F46', bg: '#ECFDF5' },
@@ -17,7 +17,7 @@ export const getPostType = (id) =>
 
 // ── Fetch posts ───────────────────────────────────────────────────────────────
 
-export const getPosts = async (orgId, userId) => {
+export const getPosts = async (orgId, userId, { limit = 20, offset = 0 } = {}) => {
   const { data, error } = await supabase
     .from('posts')
     .select(`
@@ -39,7 +39,42 @@ export const getPosts = async (orgId, userId) => {
     `)
     .eq('org_id', orgId)
     .order('pinned', { ascending: false })
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) throw error;
+  return (data || []).map(p => formatPost(p, userId));
+};
+
+
+// ── Fetch archived posts (older than 48hrs — for History screen) ──────────────
+
+export const getArchivedPosts = async (orgId, userId, { limit = 30, offset = 0 } = {}) => {
+  const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from('posts')
+    .select(`
+      id,
+      type,
+      content,
+      department_id,
+      pinned,
+      requires_ack,
+      created_at,
+      author:profiles!posts_author_id_fkey(id, full_name, avatar_color, avatar_initials),
+      department:departments(id, name),
+      reactions(emoji, user_id),
+      post_acknowledgements(user_id),
+      post_seen(user_id),
+      comments(id, content, created_at,
+        author:profiles!comments_author_id_fkey(id, full_name, avatar_color, avatar_initials)
+      )
+    `)
+    .eq('org_id', orgId)
+    .lt('created_at', cutoff)
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
 
   if (error) throw error;
   return (data || []).map(p => formatPost(p, userId));
@@ -48,7 +83,8 @@ export const getPosts = async (orgId, userId) => {
 // ── Fetch who is off today ────────────────────────────────────────────────────
 
 export const getOnLeaveToday = async (orgId) => {
-  const today = new Date().toISOString().split('T')[0];
+  const now   = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
   const { data, error } = await supabase
     .from('leave_events')
     .select(`
@@ -81,7 +117,7 @@ function formatBackDate(endDate) {
 // ── Create post ───────────────────────────────────────────────────────────────
 
 export const createPost = async ({
-  orgId, authorId, type, content, departmentId, requiresAck = false,
+  orgId, authorId, type, content, departmentId, requiresAck = false, mentionedIds = [],
 }) => {
   const { data, error } = await supabase
     .from('posts')
@@ -97,6 +133,23 @@ export const createPost = async ({
     .select()
     .single();
   if (error) throw error;
+
+  // Save @mentions from post body → Inbox notification
+  // Uses post_id directly — no fake comment needed
+  if (data && mentionedIds.length > 0) {
+    const uniqueIds = [...new Set(mentionedIds)].filter(id => id !== authorId);
+    if (uniqueIds.length > 0) {
+      const { error: mentionError } = await supabase
+        .from('comment_mentions')
+        .insert(uniqueIds.map(userId => ({
+          post_id:           data.id,
+          mentioned_user_id: userId,
+          comment_id:        null,
+        })));
+      console.log('[createPost] post mentions saved:', uniqueIds.length, mentionError?.message || '✓');
+    }
+  }
+
   return data;
 };
 
@@ -162,7 +215,11 @@ export const markPostsSeen = async (postIds, userId) => {
 
 // ── Add comment ───────────────────────────────────────────────────────────────
 
-export const addComment = async (postId, authorId, content) => {
+export const addComment = async (postId, authorId, content, mentionedUserIds = []) => {
+  console.log('[addComment] postId:', postId);
+  console.log('[addComment] authorId:', authorId);
+  console.log('[addComment] content:', content);
+  console.log('[addComment] mentionedUserIds:', mentionedUserIds);
   const { data, error } = await supabase
     .from('comments')
     .insert({ post_id: postId, author_id: authorId, content: content.trim() })
@@ -172,6 +229,21 @@ export const addComment = async (postId, authorId, content) => {
     `)
     .single();
   if (error) throw error;
+
+  // Save mentions so they appear in mentioned users' Inbox
+  if (data && mentionedUserIds.length > 0) {
+    const uniqueIds = [...new Set(mentionedUserIds)].filter(id => id !== authorId);
+    console.log('[addComment] saving mentions for uniqueIds:', uniqueIds);
+    if (uniqueIds.length > 0) {
+      const { error: mentionError } = await supabase.from('comment_mentions').insert(
+        uniqueIds.map(userId => ({ comment_id: data.id, mentioned_user_id: userId }))
+      );
+      console.log('[addComment] mention insert error:', mentionError?.message || 'none');
+    }
+  } else {
+    console.log('[addComment] no mentions to save — mentionedUserIds empty or no data');
+  }
+
   return data;
 };
 

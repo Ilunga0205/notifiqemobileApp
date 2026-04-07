@@ -3,11 +3,12 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
   StyleSheet, Modal, Pressable, KeyboardAvoidingView,
-  Platform, StatusBar, Switch,
+  Platform, StatusBar,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../lib/tokens';
 import { useApp } from '../../context/AppContext';
+import { SkeletonCalendar } from '../../components/Skeleton';
 import { supabase } from '../../lib/supabase';
 import {
   EVENT_TYPES, LEAVE_TYPES, getEventType,
@@ -15,6 +16,7 @@ import {
   deleteCalendarEvent, createLeaveEvent, deleteLeaveEvent, rsvpEvent,
 } from '../../services/calendar.service';
 import { DateRangePicker, DatePicker, dateToStr, strToDate } from '../../components/DatePicker';
+import { TimeRangePicker } from '../../components/TimePicker';
 import { getDepartments } from '../../services/member.service';
 
 const MONTHS     = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -229,7 +231,7 @@ function EventDetailSheet({ item, currentUserId, isAdmin, onClose, onDelete, onR
 
 // ── Add event / leave modal ───────────────────────────────────────────────────
 
-function AddModal({ visible, onClose, onAdd, members, currentUser, selectedDate }) {
+function AddModal({ visible, onClose, onAdd, members, currentUser, selectedDate, leave = [] }) {
   const [mode,       setMode]       = useState('event'); // 'event' | 'leave'
   const [title,      setTitle]      = useState('');
   const [type,       setType]       = useState('meeting');
@@ -242,7 +244,8 @@ function AddModal({ visible, onClose, onAdd, members, currentUser, selectedDate 
   const [note,       setNote]       = useState('');
   const [leaveType,  setLeaveType]  = useState('Annual leave');
   const [inviteeIds, setInviteeIds] = useState([]);
-  const [saving,     setSaving]     = useState(false);
+  const [saving,        setSaving]        = useState(false);
+  const [selfLeaveWarn, setSelfLeaveWarn] = useState(false);
 
   useEffect(() => {
     if (visible) {
@@ -271,7 +274,27 @@ function AddModal({ visible, onClose, onAdd, members, currentUser, selectedDate 
     if (saving) return;
     if (mode === 'event' && !title.trim()) return;
     if (!startDate) return;
+
+    // Warn if organiser is creating an event on a date they are on leave
+    if (mode === 'event' && startDate) {
+      const eventDateStr = dateToStr(startDate);
+      const selfOnLeave  = leave?.some(l =>
+        l.userId === currentUser?.id &&
+        l.startDate <= eventDateStr &&
+        l.endDate   >= eventDateStr
+      );
+      if (selfOnLeave) {
+        // Show inline warning but don't block
+        setSelfLeaveWarn(true);
+        return;
+      }
+    }
+    await doSave();
+  };
+
+  const doSave = async () => {
     setSaving(true);
+    setSelfLeaveWarn(false);
     try {
       await onAdd({ mode, title, type,
         startDate: dateToStr(startDate),
@@ -363,17 +386,14 @@ function AddModal({ visible, onClose, onAdd, members, currentUser, selectedDate 
                   />
 
                   {/* Times */}
-                  <View style={styles.dateRow}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.fieldLabel}>Start time</Text>
-                      <TextInput style={styles.input} placeholder="09:00" placeholderTextColor={colors.placeholder} value={startTime} onChangeText={setStartTime} />
-                    </View>
-                    <View style={{ width: spacing.md }} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.fieldLabel}>End time</Text>
-                      <TextInput style={styles.input} placeholder="10:00" placeholderTextColor={colors.placeholder} value={endTime} onChangeText={setEndTime} />
-                    </View>
-                  </View>
+                  <TimeRangePicker
+                    startTime={startTime}
+                    endTime={endTime}
+                    onStartChange={setStartTime}
+                    onEndChange={setEndTime}
+                    startLabel="Start time"
+                    endLabel="End time"
+                  />
 
                   {/* Location + Zoom */}
                   <Text style={styles.fieldLabel}>Location</Text>
@@ -390,18 +410,34 @@ function AddModal({ visible, onClose, onAdd, members, currentUser, selectedDate 
                   <Text style={styles.fieldLabel}>Invite team members</Text>
                   <View style={styles.inviteeGrid}>
                     {members.map(m => {
-                      const selected = inviteeIds.includes(m.user_id);
+                      const selected  = inviteeIds.includes(m.user_id);
+                      // Check if member is on leave on the event start date
+                      const eventDateStr = dateToStr(startDate);
+                      const onLeave = eventDateStr && leave?.some(l =>
+                        l.userId === m.user_id &&
+                        l.startDate <= eventDateStr &&
+                        l.endDate   >= eventDateStr
+                      );
                       return (
                         <TouchableOpacity
                           key={m.user_id}
-                          style={[styles.inviteeChip, selected && { backgroundColor: typeInfo.bg, borderColor: typeInfo.color + '50' }]}
+                          style={[
+                            styles.inviteeChip,
+                            selected  && { backgroundColor: typeInfo.bg, borderColor: typeInfo.color + '50' },
+                            onLeave && !selected && { borderColor: '#FCA5A5', backgroundColor: '#FEF2F2' },
+                          ]}
                           onPress={() => toggleInvitee(m.user_id)}
                           activeOpacity={0.8}
                         >
                           <Avatar initials={m.initials} size={22} color={m.avatar_color} />
-                          <Text style={[styles.inviteeChipText, selected && { color: typeInfo.color, fontWeight: typography.semibold }]}>
-                            {m.full_name?.split(' ')[0]}
-                          </Text>
+                          <View>
+                            <Text style={[styles.inviteeChipText, selected && { color: typeInfo.color, fontWeight: typography.semibold }]}>
+                              {m.full_name?.split(' ')[0]}
+                            </Text>
+                            {onLeave && (
+                              <Text style={{ fontSize: 9, color: '#DC2626', lineHeight: 12 }}>on leave</Text>
+                            )}
+                          </View>
                           {selected && <Text style={{ fontSize: 10, color: typeInfo.color }}>✓</Text>}
                         </TouchableOpacity>
                       );
@@ -432,9 +468,20 @@ function AddModal({ visible, onClose, onAdd, members, currentUser, selectedDate 
                     endDate={endDate}
                     onStartChange={setStartDate}
                     onEndChange={setEndDate}
-                    startLabel="From"
-                    endLabel="To"
+                    startLabel="First day off"
+                    endLabel="Last day off"
                   />
+                  {startDate && endDate && (
+                    <View style={{ backgroundColor: '#F0FDF4', borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.sm }}>
+                      <Text style={{ fontSize: 12, color: '#065F46' }}>
+                        Back in office: {(() => {
+                          const d = new Date(endDate);
+                          d.setDate(d.getDate() + 1);
+                          return d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' });
+                        })()}
+                      </Text>
+                    </View>
+                  )}
 
                   <View style={[styles.infoBanner]}>
                     <Text style={styles.infoBannerText}>
@@ -444,14 +491,43 @@ function AddModal({ visible, onClose, onAdd, members, currentUser, selectedDate 
                 </>
               )}
 
-              <TouchableOpacity
-                style={[styles.saveBtn, { backgroundColor: (mode === 'event' ? !title.trim() : false) || !startDate || saving ? colors.border : colors.brand }]}
-                onPress={handleSave}
-                disabled={saving || (mode === 'event' && !title.trim()) || !startDate}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.saveBtnText}>{saving ? 'Saving...' : mode === 'leave' ? 'Add leave' : 'Add to calendar'}</Text>
-              </TouchableOpacity>
+              {selfLeaveWarn && (
+                <View style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: radius.md, padding: spacing.md, marginTop: spacing.md }}>
+                  <Text style={{ fontSize: 13, color: '#DC2626', fontWeight: typography.semibold, marginBottom: 4 }}>
+                    You are on leave on this date
+                  </Text>
+                  <Text style={{ fontSize: 12, color: '#DC2626', marginBottom: spacing.md }}>
+                    You have leave scheduled during this event. Do you still want to create it?
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 10, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: 'center' }}
+                      onPress={() => setSelfLeaveWarn(false)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={{ fontSize: 13, color: colors.muted, fontWeight: typography.medium }}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 10, borderRadius: radius.md, backgroundColor: '#DC2626', alignItems: 'center' }}
+                      onPress={doSave}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={{ fontSize: 13, color: colors.white, fontWeight: typography.semibold }}>Create anyway</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+
+              {!selfLeaveWarn && (
+                <TouchableOpacity
+                  style={[styles.saveBtn, { backgroundColor: (mode === 'event' ? !title.trim() : false) || !startDate || saving ? colors.border : colors.brand }]}
+                  onPress={handleSave}
+                  disabled={saving || (mode === 'event' && !title.trim()) || !startDate}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.saveBtnText}>{saving ? 'Saving...' : mode === 'leave' ? 'Add leave' : 'Add to calendar'}</Text>
+                </TouchableOpacity>
+              )}
 
               <View style={{ height: 40 }} />
             </ScrollView>
@@ -468,7 +544,8 @@ export default function CalendarScreen({ navigation }) {
   const { user, orgId, orgName, isAdmin } = useApp();
 
   const today     = new Date();
-  const todayStr  = today.toISOString().split('T')[0];
+  // Use local date — toISOString() returns UTC which can be wrong in non-UTC timezones
+  const todayStr  = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
 
   const [year,          setYear]          = useState(today.getFullYear());
   const [month,         setMonth]         = useState(today.getMonth() + 1);
@@ -578,13 +655,22 @@ export default function CalendarScreen({ navigation }) {
   const daysInMonth     = new Date(year, month, 0).getDate();
 
   const prevMonth = () => {
-    if (month === 1) { setMonth(12); setYear(y => y - 1); }
-    else setMonth(m => m - 1);
+    const newMonth = month === 1 ? 12 : month - 1;
+    const newYear  = month === 1 ? year - 1 : year;
+    setMonth(newMonth);
+    if (month === 1) setYear(y => y - 1);
+    // If today is in the new month keep it selected, otherwise select 1st
+    const todayInNewMonth = today.getFullYear() === newYear && today.getMonth() + 1 === newMonth;
+    setSelectedDate(todayInNewMonth ? todayStr : toDateStr(newYear, newMonth, 1));
   };
 
   const nextMonth = () => {
-    if (month === 12) { setMonth(1); setYear(y => y + 1); }
-    else setMonth(m => m + 1);
+    const newMonth = month === 12 ? 1 : month + 1;
+    const newYear  = month === 12 ? year + 1 : year;
+    setMonth(newMonth);
+    if (month === 12) setYear(y => y + 1);
+    const todayInNewMonth = today.getFullYear() === newYear && today.getMonth() + 1 === newMonth;
+    setSelectedDate(todayInNewMonth ? todayStr : toDateStr(newYear, newMonth, 1));
   };
 
   // ── Selected date items ──────────────────────────────────────────────────
@@ -596,13 +682,7 @@ export default function CalendarScreen({ navigation }) {
 
   const onLeaveToday = leave.filter(l => l.startDate <= todayStr && l.endDate >= todayStr);
 
-  if (loading) {
-    return (
-      <View style={[styles.root, { alignItems: 'center', justifyContent: 'center' }]}>
-        <Text style={{ fontSize: 13, color: colors.subtle }}>Loading calendar...</Text>
-      </View>
-    );
-  }
+  if (loading && events.length === 0 && leave.length === 0) return <SkeletonCalendar />;
 
   return (
     <View style={styles.root}>
@@ -828,6 +908,7 @@ export default function CalendarScreen({ navigation }) {
         members={members}
         currentUser={user}
         selectedDate={selectedDate}
+        leave={leave}
       />
     </View>
   );

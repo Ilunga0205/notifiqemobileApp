@@ -292,7 +292,7 @@ export default function SettingsScreen({ navigation }) {
 
       {/* Header */}
       {Platform.OS === 'ios' ? (
-        <SafeAreaView style={{ backgroundColor: colors.white }}>
+        <SafeAreaView edges={['top']} style={{ backgroundColor: colors.white }}>
           <View style={styles.appHeader}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.backBtnText}>‹</Text>
